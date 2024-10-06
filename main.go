@@ -15,6 +15,20 @@ type ThreeBitIn struct {
 	C int
 }
 
+type Gate struct {
+	Name string
+	Inputs []int
+	Outputs	[]int
+}
+
+type Node struct {
+	ID		int
+	Label	string
+	// Chip	Gate
+	Children []Node
+}
+
+var node_tree = []node{}
 var tree = []string{}
 
 var count = 0
@@ -32,6 +46,8 @@ func reverseSlice[T any](s []T) []T {
 var a = []int{1}
 var b = []int{1}
 
+
+/*
 func run_alu() {
 
 	var out = []int{0}
@@ -41,14 +57,14 @@ func run_alu() {
 	// var y = []int{1}
 	// var x = []int{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 	// // var y = []int{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}        // 16 bit
-	var zx = []int{1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0} // 18
+	zx := []int{1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0} // 18
 	var nx = []int{0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 1}
 	var zy = []int{1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0}
 	var ny = []int{0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1}
 	var f = []int{1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0}
 	var no = []int{0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1}
 
-	for i := range len(zx) {
+	for i := range zx {
 		// fmt.Println(x, y, "|", zx[i], nx[i], zy[i], ny[i], f[i], no[i], "|")
 
 		x[0] = 1
@@ -59,8 +75,8 @@ func run_alu() {
 		fmt.Println(x, y, "|", a, b, "|", zx[i], nx[i], zy[i], ny[i], f[i], no[i], "|", out)
 		x[0] = 1
 	}
-
 }
+*/
 
 func main() {
 	fmt.Println("Gates Running\n")
@@ -91,9 +107,17 @@ func main() {
 
 func And(x, y int) (o int) {
 	count++
+	node := Node{
+		ID: count,
+		Label: "And",
+		Children: []
+	}
+
 	tree = append(tree, "And["+strconv.Itoa(count))
 	a := Nand(x, y)
 	b := Not(a)
+
+
 
 	tree = append(tree, "]")
 	return b
@@ -119,7 +143,16 @@ func Not(x int) (o int) {
 	tree = append(tree, "]")
 	return c
 	// return Nand(x, x)
+}
 
+func Not16(x [16]int) []int {
+
+	var output []int
+	for i := range x {
+		output = append(output, Nand(x[i], x[i]))		
+	}
+
+	return output
 }
 
 func Nand(in_1, in_2 int) (out int) {
@@ -134,14 +167,26 @@ func Nand(in_1, in_2 int) (out int) {
 	// return !(a && b)
 }
 
-func test_Nand()
+func test_Nand() {
+}
 
 func Xor(a, b int) (o int) {
 	return Or(And(a, Not(b)), And(b, Not(a)))
 }
 
+func Xor16(a, b [16]int) []int {
+	
+	var xor16 []int
+	for i := range a {
+		xor16 = append(xor16, Xor(a[i], b[i]))
+	}
+
+	return xor16
+
+}
+
 // TODO Add n-bit adder/xor/or/nand, etc
-func Adder3Way(a, b, c int) (o int) {
+func Adder3Way (a, b, c int) (o int) {
 	ab := And(a, b)
 	d := And(ab, c)
 	return d
@@ -177,7 +222,7 @@ func test_Mux() {
 }
 
 func Mux16(a, b [16]int, sel int) (out [16]int) {
-	for i := range 16 {
+	for i := range a {
 		out[i] = Mux(a[i], b[i], sel)
 	}
 	return out
@@ -190,10 +235,10 @@ func AndMuxOr(a, b, sel int) (o int) {
 	return Or(a, b)
 }
 
-func And16(a, b []int) (o []int) {
-	var outputs = []int{}
+func And16(a, b [16]int) (o [16]int) {
+	var outputs = [16]int{}
 	for i := range a {
-		outputs = append(outputs, And(a[i], b[i]))
+		outputs[i] = And(a[i], b[i])
 	}
 	return outputs
 
@@ -353,27 +398,27 @@ func FullAdder(a, b, c int) (sum, carry int) {
 
 }
 
-func N_BitAdder(a, b []int) (out []int) {
+func Adder16(a, b [16]int) (out [16]int) {
 	// fmt.Println(len(a), "Bit Adder")
-	sum := []int{}
+	sum := [16]int{}
 	// carry := []int{}
 	s1, c1 := FullAdder(a[0], b[0], 0)
-	sum = append(sum, s1)
 	// carry = append(carry, c1)
-	for i := range len(a) {
+	for i := range a {
 		if i > 0 {
 			s1, c1 = FullAdder(a[i], b[i], c1)
-			sum = append(sum, s1)
+			sum[i] = s1
 			// carry = append(carry, c1)
 		}
 	}
 	return sum
 }
 
-func Incrementer(a []int) (out []int) {
-	b := make([]int, len(a))
+/*
+func Incrementer(a [16]int) (out [16]int) {
+	b := make([16]int, len(a))
 	b[0] = 1
-	c := N_BitAdder(a, b)
+	c := Adder16(a, b)
 
 	fmt.Println()
 	fmt.Println(reverseSlice(a))
@@ -383,50 +428,43 @@ func Incrementer(a []int) (out []int) {
 	return c
 
 }
+*/
 
 // ALU performs various arithmetic and logic operations based on control flags.
-func ALU(x, y []int, zx, nx, zy, ny, f, no int) []int {
-	// Apply zx operation
-	if zx == 1 {
-		for i := range x {
-			x[i] = 0
-		}
+func ALU(x, y [16]int, zx, nx, zy, ny, f, no int) (output [16]int) {
+
+	//ZX operation
+	var nxzx = [16]int{}
+	
+	for i := range x {
+		o1 := And(x[i], Not(zx))
+		xo1 := Xor(o1, nx)
+		nxzx[i] = xo1
 	}
-	// Apply nx operation
-	if nx == 1 {
-		for i := range x {
-			x[i] = 1 - x[i] // Flip the bit
-		}
+	
+
+	//Zy operation
+	var nyzy = [16]int{}
+	
+	for i := range x {
+		o1 := And(y[i], Not(zy))
+		yo1 := Xor(o1, ny)
+		nyzy[i] = yo1
 	}
-	// Apply zy operation
-	if zy == 1 {
-		for i := range y {
-			y[i] = 0
-		}
-	}
-	// Apply ny operation
-	if ny == 1 {
-		for i := range y {
-			y[i] = 1 - y[i] // Flip the bit
-		}
+	
+	// Adder function
+	adder := Adder16(nxzx, nyzy)
+
+	// Bitwise And
+	bitwise_and := And16(nxzx, nyzy)
+
+	f_out := Mux16(adder, bitwise_and, f)
+
+	var no_out = [16]int{}
+	for i := range f_out {
+		no_out[i] = Xor(f_out[i], no)
 	}
 
-	// Declare the output slice
-	var out []int
-
-	// Apply f operation
-	if f == 1 {
-		out = N_BitAdder(x, y)
-	} else {
-		out = And16(x, y)
-	}
-
-	// Apply no operation
-	if no == 1 {
-		for i := range out {
-			out[i] = 1 - out[i] // Flip the bit
-		}
-	}
-
-	return out
+	return no_out
+	
 }
