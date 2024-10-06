@@ -15,7 +15,7 @@ type ThreeBitIn struct {
 	C int
 }
 
-type Gate struct {
+type Chip struct {
 	Name string
 	Inputs []int
 	Outputs	[]int
@@ -28,7 +28,7 @@ type Node struct {
 	Children []Node
 }
 
-var node_tree = []node{}
+var node_tree = []Node{}
 var tree = []string{}
 
 var count = 0
@@ -85,8 +85,8 @@ func main() {
 	// Not
 	// Or
 	// Xor
-	test_Mux()  // Passed
-	test_DMux() // Passed
+	//test_Mux()  // Passed
+	////test_DMux() // Passed
 	// Not16
 	// And16
 	// Or16
@@ -94,9 +94,10 @@ func main() {
 	// Or8Way
 	// Mux4Way16
 	// Mux8Way16
-	test_DMX4W() // Passed
-	test_DMX8W() // Passed
-	// HalfAdder
+	//test_DMX4W() // Pass
+	//test_DMX8W() // Pass
+	//test_halfadder() // Pass
+	//test_fulladder() //Pass
 	// FullAdder
 	// Add16
 	// Inc16
@@ -107,11 +108,6 @@ func main() {
 
 func And(x, y int) (o int) {
 	count++
-	node := Node{
-		ID: count,
-		Label: "And",
-		Children: []
-	}
 
 	tree = append(tree, "And["+strconv.Itoa(count))
 	a := Nand(x, y)
@@ -380,11 +376,23 @@ func test_DMX8W() {
 // -----------------------------------------
 
 func HalfAdder(a, b int) (sum, carry int) {
+	//fmt.Println("Half Adder", a, b)
 
 	carry = And(a, b)
 	sum = Xor(a, b)
 
 	return sum, carry
+}
+
+func test_halfadder() {
+	x := []int{0,0,1,1}
+	y := []int{0,1,0,1}
+	
+	fmt.Println("x|y|c|s\n-------")
+	for i := range x {
+		s, c := HalfAdder(x[i], y[i])
+		fmt.Printf("%d|%d|%d|%d\n", x[i], y[i], c, s)
+	}
 }
 
 // Full Adder
@@ -395,10 +403,23 @@ func FullAdder(a, b, c int) (sum, carry int) {
 	sum = s2
 
 	return sum, carry
-
 }
 
-func Adder16(a, b [16]int) (out [16]int) {
+func test_fulladder() {
+	x := []int{0,0,0,0,1,1,1,1}
+	y := []int{0,0,1,1,0,0,1,1}
+	z := []int{0,1,0,1,0,1,0,1}
+
+	fmt.Println("x|y|z||c|s")
+	fmt.Println("--------------")
+
+	for i := range x {
+		s,c := FullAdder(x[i], y[i], z[i])
+		fmt.Printf("%d|%d|%d||%d|%d\n", x[i], y[i], z[i], c, s)
+	}
+}
+
+func Add16(a, b [16]int) (out [16]int) {
 	// fmt.Println(len(a), "Bit Adder")
 	sum := [16]int{}
 	// carry := []int{}
@@ -453,7 +474,7 @@ func ALU(x, y [16]int, zx, nx, zy, ny, f, no int) (output [16]int) {
 	}
 	
 	// Adder function
-	adder := Adder16(nxzx, nyzy)
+	adder := Add16(nxzx, nyzy)
 
 	// Bitwise And
 	bitwise_and := And16(nxzx, nyzy)
