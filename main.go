@@ -97,9 +97,9 @@ func main() {
 	//test_DMX4W() // Pass
 	//test_DMX8W() // Pass
 	//test_halfadder() // Pass
-	//test_fulladder() //Pass
+	test_fulladder() //Pass
+	test_Add16()
 	// FullAdder
-	// Add16
 	// Inc16
 	// ALU
 }
@@ -399,40 +399,60 @@ func test_halfadder() {
 func FullAdder(a, b, c int) (sum, carry int) {
 	s1, c1 := HalfAdder(a, b)
 	s2, c2 := HalfAdder(s1, c)
-	carry = Or(c1, c2)
+	carry = Xor(c1, c2)
 	sum = s2
 
 	return sum, carry
 }
 
 func test_fulladder() {
+	fmt.Println("Test Full Adder")
 	x := []int{0,0,0,0,1,1,1,1}
 	y := []int{0,0,1,1,0,0,1,1}
 	z := []int{0,1,0,1,0,1,0,1}
+	carry := []int{0,0,0,0,0,0,0,0}
+	sum := []int{0,0,0,0,0,0,0,0,0}
 
 	fmt.Println("x|y|z||c|s")
 	fmt.Println("--------------")
 
 	for i := range x {
 		s,c := FullAdder(x[i], y[i], z[i])
+		sum[i] = s
+		carry[i] = c
 		fmt.Printf("%d|%d|%d||%d|%d\n", x[i], y[i], z[i], c, s)
 	}
+
+	fmt.Println("---------------------")
+	fmt.Println("c= ", reverseSlice(carry), "\nx= ",reverseSlice(x), "\ny= ", reverseSlice(y), "\nz= ", reverseSlice(z), "\n--------------------------", "\ns= ", reverseSlice(sum))
 }
 
-func Add16(a, b [16]int) (out [16]int) {
+func Add16(a, b [16]int) (out, carry [16]int) {
 	// fmt.Println(len(a), "Bit Adder")
 	sum := [16]int{}
-	// carry := []int{}
+	carry = [16]int{}
+
 	s1, c1 := FullAdder(a[0], b[0], 0)
-	// carry = append(carry, c1)
+	sum[0] = s1
+
+	carry[0] = c1
 	for i := range a {
 		if i > 0 {
 			s1, c1 = FullAdder(a[i], b[i], c1)
 			sum[i] = s1
-			// carry = append(carry, c1)
+			carry[i] = c1
 		}
 	}
-	return sum
+	return sum, carry
+}
+
+func test_Add16() {
+	fmt.Println("Test Add16")
+	a := [16]int{1,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0}
+	b := [16]int{0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+
+	sum, carry := Add16(a, b)
+	fmt.Println("c= ", carry, "\na= ", a, "\nb= ", b, "\n----------------------------\ns= ", sum)
 }
 
 /*
@@ -474,7 +494,7 @@ func ALU(x, y [16]int, zx, nx, zy, ny, f, no int) (output [16]int) {
 	}
 	
 	// Adder function
-	adder := Add16(nxzx, nyzy)
+	adder, _ := Add16(nxzx, nyzy)
 
 	// Bitwise And
 	bitwise_and := And16(nxzx, nyzy)
