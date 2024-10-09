@@ -509,3 +509,40 @@ func ALU(x, y [16]int, zx, nx, zy, ny, f, no int) (output [16]int) {
 	return no_out
 	
 }
+
+func DFF(d, c int) {
+	
+	nand1 := Nand(d, Not(c))
+	nand2 := Nand(nand1, Not(c))
+
+	nand3 := Nand(nand1, nand4)
+	nand4 := Nand(nand3, nand2)
+
+	nand5 := Nand(nand3, c)
+	nand6 := Nand(nand5, c)
+
+	nand7 := Nand(nand4, nand8)
+	nand8 := Nand(nand7, nand6)
+
+	fmt.Println(d, c, nand7, nand8)
+}
+
+// 1-bit register
+type Bit struct {
+	In	int
+	Load int
+	Out int
+}
+
+//func Register(in, load int) (out in) {
+//}
+
+
+
+
+
+
+
+
+
+
