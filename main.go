@@ -2,51 +2,447 @@ package main
 
 import (
 	"fmt"
-	"strconv"
+	"os"
+	"strings"
 )
 
-type Inputs struct {
-	X int
-	Y int
-}
-type ThreeBitIn struct {
-	A int
-	B int
-	C int
-}
+type Signal int
 
-type Chip struct {
-	Name string
-	Inputs []int
-	Outputs	[]int
+type Gate struct {
+	NodeID int
+	Name   string
+	Inputs []Signal
+	Output Signal
+	Parent int // 0 = top-level
 }
 
-type Node struct {
-	ID		int
-	Label	string
-	// Chip	Gate
-	Children []Node
+type Circuit struct {
+	Gates       []Gate
+	nextID      int
+	recording   bool
+	parentStack []int
 }
 
-var node_tree = []Node{}
-var tree = []string{}
+func NewCircuit() *Circuit {
+	return &Circuit{recording: true}
+}
 
-var count = 0
+func (c *Circuit) alloc() Signal {
+	s := Signal(c.nextID)
+	c.nextID++
+	return s
+}
 
-// Need to reverse the order sometems due to Go reading from the left
-func reverseSlice[T any](s []T) []T {
-	n := len(s)
-	reversed := make([]T, n)
-	for i, element := range s {
-		reversed[n-1-i] = element
+func (c *Circuit) currentParent() int {
+	if len(c.parentStack) == 0 {
+		return 0
 	}
-	return reversed
+	return c.parentStack[len(c.parentStack)-1]
 }
 
-var a = []int{1}
-var b = []int{1}
+func (c *Circuit) nand(a, b Signal) Signal {
+	out := c.alloc()
+	c.Gates = append(c.Gates, Gate{
+		NodeID: int(out),
+		Name:   "Nand",
+		Inputs: []Signal{a, b},
+		Output: out,
+		Parent: c.currentParent(),
+	})
+	return out
+}
 
+func (c *Circuit) chip(name string, inputs []Signal, out Signal) Signal {
+	if !c.recording {
+		return out
+	}
+	node := int(c.alloc())
+	c.Gates = append(c.Gates, Gate{
+		NodeID: node,
+		Name:   name,
+		Inputs: inputs,
+		Output: out,
+		Parent: c.currentParent(),
+	})
+	return out
+}
 
+func (c *Circuit) quiet(fn func()) {
+	old := c.recording
+	c.recording = false
+	fn()
+	c.recording = old
+}
+
+// begin a hierarchical chip; returns the node ID to push
+func (c *Circuit) begin(name string, inputs []Signal) int {
+	node := int(c.alloc())
+	c.Gates = append(c.Gates, Gate{
+		NodeID: node,
+		Name:   name,
+		Inputs: inputs,
+		Parent: c.currentParent(),
+	})
+	c.parentStack = append(c.parentStack, node)
+	return node
+}
+
+func (c *Circuit) end() {
+	if len(c.parentStack) > 0 {
+		c.parentStack = c.parentStack[:len(c.parentStack)-1]
+	}
+}
+
+// ---------- Gates ----------
+
+func (c *Circuit) Nand(a, b Signal) Signal { return c.nand(a, b) }
+
+func (c *Circuit) Not(a Signal) Signal {
+	var out Signal
+	c.quiet(func() { out = c.Nand(a, a) })
+	return c.chip("Not", []Signal{a}, out)
+}
+
+func (c *Circuit) And(a, b Signal) Signal {
+	var out Signal
+	c.quiet(func() { out = c.Not(c.Nand(a, b)) })
+	return c.chip("And", []Signal{a, b}, out)
+}
+
+func (c *Circuit) Or(a, b Signal) Signal {
+	var out Signal
+	c.quiet(func() { out = c.Nand(c.Not(a), c.Not(b)) })
+	return c.chip("Or", []Signal{a, b}, out)
+}
+
+func (c *Circuit) Xor(a, b Signal) Signal {
+	var out Signal
+	c.quiet(func() {
+		out = c.Or(c.And(a, c.Not(b)), c.And(b, c.Not(a)))
+	})
+	return c.chip("Xor", []Signal{a, b}, out)
+}
+
+func (c *Circuit) HalfAdder(a, b Signal) (sum, carry Signal) {
+	c.begin("HalfAdder", []Signal{a, b})
+	carry = c.And(a, b)
+	sum = c.Xor(a, b)
+	c.end()
+	return sum, carry
+}
+
+func (c *Circuit) FullAdder(a, b, cin Signal) (sum, cout Signal) {
+	c.begin("FullAdder", []Signal{a, b, cin})
+	s1, c1 := c.HalfAdder(a, b)
+	s2, c2 := c.HalfAdder(s1, cin)
+	cout = c.Or(c1, c2)
+	sum = s2
+	c.end()
+	return sum, cout
+}
+
+// ---------- Evaluation ----------
+
+func (c *Circuit) Evaluate(inputs map[Signal]int) map[Signal]int {
+	vals := make(map[Signal]int)
+	for k, v := range inputs {
+		vals[k] = v
+	}
+	for _, g := range c.Gates {
+		if g.Name != "Nand" {
+			continue
+		}
+		a, b := vals[g.Inputs[0]], vals[g.Inputs[1]]
+		if a == 1 && b == 1 {
+			vals[g.Output] = 0
+		} else {
+			vals[g.Output] = 1
+		}
+	}
+	return vals
+}
+
+// ---------- Graphviz with clusters ----------
+
+func (c *Circuit) ToDOT(highLevelOnly bool) string {
+	var b strings.Builder
+	b.WriteString("digraph Circuit {\n")
+	b.WriteString("  rankdir=LR;\n")
+	b.WriteString("  compound=true;\n")
+	b.WriteString("  node [shape=box, style=filled, fillcolor=lightblue];\n")
+	b.WriteString("  edge [arrowsize=0.7];\n")
+
+	// Separate containers (have children) from leaf chips
+	childrenOf := map[int][]Gate{}
+	var leaves []Gate
+	isContainer := map[int]bool{}
+
+	for _, g := range c.Gates {
+		if highLevelOnly && g.Name == "Nand" {
+			continue
+		}
+		childrenOf[g.Parent] = append(childrenOf[g.Parent], g)
+	}
+	for id, kids := range childrenOf {
+		if len(kids) > 0 && id != 0 {
+			isContainer[id] = true
+		}
+	}
+	for _, g := range c.Gates {
+		if highLevelOnly && g.Name == "Nand" {
+			continue
+		}
+		if !isContainer[g.NodeID] {
+			leaves = append(leaves, g)
+		}
+	}
+
+	// Emit clusters + leaf nodes
+	var emit func(parent int, indent string)
+	emit = func(parent int, indent string) {
+		for _, g := range childrenOf[parent] {
+			if isContainer[g.NodeID] {
+				b.WriteString(fmt.Sprintf("%ssubgraph cluster_%d {\n", indent, g.NodeID))
+				b.WriteString(fmt.Sprintf("%s  label=\"%s\";\n", indent, g.Name))
+				b.WriteString(fmt.Sprintf("%s  style=filled;\n", indent))
+				b.WriteString(fmt.Sprintf("%s  color=gray;\n", indent))
+				b.WriteString(fmt.Sprintf("%s  fillcolor=lightyellow;\n", indent))
+				emit(g.NodeID, indent+"  ")
+				b.WriteString(indent + "}\n")
+			} else {
+				b.WriteString(fmt.Sprintf("%sg%d [label=\"%s\"];\n", indent, g.NodeID, g.Name))
+			}
+		}
+	}
+	emit(0, "  ")
+
+	// Producer map: only leaf chips produce visible signals
+	producer := map[Signal]int{}
+	for _, g := range leaves {
+		if g.Output != 0 {
+			producer[g.Output] = g.NodeID
+		}
+	}
+
+	// Primary inputs
+	used := map[Signal]bool{}
+	for _, g := range leaves {
+		for _, in := range g.Inputs {
+			if _, ok := producer[in]; !ok {
+				used[in] = true
+			}
+		}
+	}
+	for in := range used {
+		b.WriteString(fmt.Sprintf("  in_%d [label=\"in_%d\", shape=ellipse, fillcolor=lightgreen];\n", in, in))
+	}
+
+	// Edges only between visible nodes
+	for _, g := range leaves {
+		for _, in := range g.Inputs {
+			var src string
+			if nid, ok := producer[in]; ok {
+				src = fmt.Sprintf("g%d", nid)
+			} else {
+				src = fmt.Sprintf("in_%d", in)
+			}
+			b.WriteString(fmt.Sprintf("  %s -> g%d;\n", src, g.NodeID))
+		}
+	}
+
+	b.WriteString("}\n")
+	return b.String()
+}
+func main() {
+	c := NewCircuit()
+
+	var x, y [16]Signal
+	for i := 0; i < 16; i++ {
+		x[i] = c.alloc()
+		y[i] = c.alloc()
+	}
+	zx := c.alloc()
+	nx := c.alloc()
+	zy := c.alloc()
+	ny := c.alloc()
+	f := c.alloc()
+	no := c.alloc()
+
+	out := c.ALU(x, y, zx, nx, zy, ny, f, no)
+
+	// Example: compute x + y (zx=nx=zy=ny=no=0, f=1)
+	inputs := map[Signal]int{
+		zx: 0, nx: 0, zy: 0, ny: 0, f: 1, no: 0,
+	}
+	// set a couple of bits
+	inputs[x[0]] = 1
+	inputs[y[0]] = 1
+
+	vals := c.Evaluate(inputs)
+	fmt.Println("out[0] =", vals[out[0]]) // should be 0 with carry 1 if Add16 is correct
+
+	os.WriteFile("alu.dot", []byte(c.ToDOT(true)), 0644)
+	fmt.Println("Wrote alu.dot")
+}
+
+// 1-bit register
+type Bit struct {
+	In   int
+	Load int
+	Out  int
+}
+
+// func (c *Circuit) HalfAdder(a, b Signal) (sum, carry Signal) {
+// 	//fmt.Println("Half Adder", a, b)
+// 	carry = c.And(a, b)
+// 	sum = c.Xor(a, b)
+// 	return sum, carry
+// }
+//
+// func (c *Circuit) Xor(a, b Signal) Signal {
+// 	var out Signal
+// 	c.quiet(func() {
+// 		out = c.Or(
+// 			c.And(a, c.Not(b)),
+// 			c.And(b, c.Not(a)),
+// 		)
+// 	})
+// 	return c.chip("Xor", []Signal{a, b}, out)
+// }
+//
+// // // Full Adder
+// func (c *Circuit) FullAdder(a, b, cin Signal) (sum, cout Signal) {
+// 	var s, co Signal
+// 	c.quiet(func() {
+// 		// two half-adders + or for carry
+// 		s1, c1 := c.HalfAdder(a, b)
+// 		s2, c2 := c.HalfAdder(s1, cin)
+// 		co = c.Or(c1, c2)
+// 		s = s2
+// 	})
+// 	sum = c.chip("Sum", []Signal{a, b, cin}, s)
+// 	cout = c.chip("Cout", []Signal{a, b, cin}, co)
+// 	return sum, cout
+// }
+
+func (c *Circuit) Add16(a, b [16]Signal) (out, carry [16]Signal) {
+	c.begin("Add16", nil)
+	sum := [16]Signal{}
+	carry = [16]Signal{}
+
+	s1, c1 := c.FullAdder(a[0], b[0], 0)
+	sum[0] = s1
+
+	carry[0] = c1
+	for i := range a {
+		if i > 0 {
+			s1, c1 = c.FullAdder(a[i], b[i], c1)
+			sum[i] = s1
+			carry[i] = c1
+		}
+	}
+	c.end()
+	return sum, carry
+}
+
+func (c *Circuit) DMux(in, sel Signal) (a, b Signal) {
+	// s||a|b || (i = (in))
+	// --------
+	// 0||i|0
+	// 1||0|i
+	// --------
+	// 0||0|0
+	// 0||1|0
+	// 1||0|0
+	// 1||0|1
+
+	// If sel == 0 -> out = (in, 0)
+	// out = in , 0
+	// if in = 0 -> 0||0|0
+	// if in = 1 -> 0||1,0 -> And(in, Not(sel))
+
+	// if sel == 1 -> out = (0, in)
+	// out = 0 , in
+	// if in = 0 -> 1||0|0
+	// if in = 1 -> 1||0|1 -> And(in, sel)
+
+	a = c.And(in, c.Not(sel))
+	b = c.And(in, sel)
+	return a, b
+}
+
+func (c *Circuit) And16(a, b [16]Signal) (o [16]Signal) {
+	var outputs = [16]Signal{}
+	for i := range a {
+		outputs[i] = c.And(a[i], b[i])
+	}
+	return outputs
+
+}
+
+func (c *Circuit) Mux(a, b, sel Signal) Signal {
+	c.begin("Mux", nil)
+	var out Signal
+	c.quiet(func() {
+		selA := c.And(a, c.Not(sel))
+		selB := c.And(b, sel)
+		out = c.Or(selA, selB)
+	})
+	c.end()
+	return c.chip("Mux", []Signal{a, b, sel}, out)
+}
+
+func (c *Circuit) Mux16(a, b [16]Signal, sel Signal) (out [16]Signal) {
+	c.begin("Mux16", nil)
+	for i := range a {
+		out[i] = c.Mux(a[i], b[i], sel)
+	}
+	c.end()
+	return out
+}
+
+// ALU performs various arithmetic and logic operations based on control flags.
+func (c *Circuit) ALU(x, y [16]Signal, zx, nx, zy, ny, f, no Signal) (output [16]Signal) {
+
+	c.begin("ALU", nil)
+
+	//ZX operation
+	var nxzx = [16]Signal{}
+
+	for i := range x {
+		o1 := c.And(x[i], c.Not(zx))
+		xo1 := c.Xor(o1, nx)
+		nxzx[i] = xo1
+	}
+
+	//Zy operation
+	var nyzy = [16]Signal{}
+
+	for i := range x {
+		o1 := c.And(y[i], c.Not(zy))
+		yo1 := c.Xor(o1, ny)
+		nyzy[i] = yo1
+	}
+
+	// Adder function
+	adder, _ := c.Add16(nxzx, nyzy)
+
+	// Bitwise And
+	bitwise_and := c.And16(nxzx, nyzy)
+
+	f_out := c.Mux16(adder, bitwise_and, f)
+
+	var no_out = [16]Signal{}
+	for i := range f_out {
+		no_out[i] = c.Xor(f_out[i], no)
+	}
+
+	c.end()
+	return no_out
+
+}
+
+//
 /*
 func run_alu() {
 
@@ -78,383 +474,301 @@ func run_alu() {
 }
 */
 
-func main() {
-	fmt.Println("Gates Running\n")
-	// Nand
-	// And
-	// Not
-	// Or
-	// Xor
-	//test_Mux()  // Passed
-	////test_DMux() // Passed
-	// Not16
-	// And16
-	// Or16
-	// Mux16
-	// Or8Way
-	// Mux4Way16
-	// Mux8Way16
-	//test_DMX4W() // Pass
-	//test_DMX8W() // Pass
-	//test_halfadder() // Pass
-	test_fulladder() //Pass
-	test_Add16()
-	// FullAdder
-	// Inc16
-	// ALU
-}
-
 // type int uint8
 
-func And(x, y int) (o int) {
-	count++
-
-	tree = append(tree, "And["+strconv.Itoa(count))
-	a := Nand(x, y)
-	b := Not(a)
-
-
-
-	tree = append(tree, "]")
-	return b
-	// return Not(Nand(x, y))
-}
-
-func Or(x, y int) (o int) {
-	count++
-	tree = append(tree, "Or["+strconv.Itoa(count))
-	// return Not(And(Not(x), Not(y)))
-	a := Not(x)
-	b := Not(y)
-	c := Nand(a, b)
-	tree = append(tree, "]")
-	return c
-	// return Nand(Not(x), Not(y))
-}
-
-func Not(x int) (o int) {
-	count++
-	tree = append(tree, "Not["+strconv.Itoa(count))
-	c := Nand(x, x)
-	tree = append(tree, "]")
-	return c
-	// return Nand(x, x)
-}
-
-func Not16(x [16]int) []int {
-
-	var output []int
-	for i := range x {
-		output = append(output, Nand(x[i], x[i]))		
-	}
-
-	return output
-}
-
-func Nand(in_1, in_2 int) (out int) {
-	count++
-	tree = append(tree, "Nand["+strconv.Itoa(count))
-	if in_1 == 1 && in_2 == 1 {
-		tree = append(tree, "]")
-		return 0
-	}
-	tree = append(tree, "]")
-	return 1
-	// return !(a && b)
-}
-
-func test_Nand() {
-}
-
-func Xor(a, b int) (o int) {
-	return Or(And(a, Not(b)), And(b, Not(a)))
-}
-
-func Xor16(a, b [16]int) []int {
-	
-	var xor16 []int
-	for i := range a {
-		xor16 = append(xor16, Xor(a[i], b[i]))
-	}
-
-	return xor16
-
-}
+// func And(x, y int) (o int) {
+// 	count++
+//
+// 	tree = append(tree, "And["+strconv.Itoa(count))
+// 	a := Nand(x, y)
+// 	b := Not(a)
+//
+// 	tree = append(tree, "]")
+// 	return b
+// 	// return Not(Nand(x, y))
+// }
+//
+// func Or(x, y int) (o int) {
+// 	count++
+// 	tree = append(tree, "Or["+strconv.Itoa(count))
+// 	// return Not(And(Not(x), Not(y)))
+// 	a := Not(x)
+// 	b := Not(y)
+// 	c := Nand(a, b)
+// 	tree = append(tree, "]")
+// 	return c
+// 	// return Nand(Not(x), Not(y))
+// }
+//
+// func Not(x int) (o int) {
+// 	count++
+// 	tree = append(tree, "Not["+strconv.Itoa(count))
+// 	c := Nand(x, x)
+// 	tree = append(tree, "]")
+// 	return c
+// 	// return Nand(x, x)
+// }
+//
+// func Not16(x [16]int) []int {
+//
+// 	var output []int
+// 	for i := range x {
+// 		output = append(output, Nand(x[i], x[i]))
+// 	}
+//
+// 	return output
+// }
+//
+// func Nand(in_1, in_2 int) (out int) {
+// 	count++
+// 	tree = append(tree, "Nand["+strconv.Itoa(count))
+// 	if in_1 == 1 && in_2 == 1 {
+// 		tree = append(tree, "]")
+// 		return 0
+// 	}
+// 	tree = append(tree, "]")
+// 	return 1
+// 	// return !(a && b)
+// }
+//
+// func test_Nand() {
+// }
+//
+// func Xor(a, b int) (o int) {
+// 	return Or(And(a, Not(b)), And(b, Not(a)))
+// }
+//
+// func Xor16(a, b [16]int) []int {
+//
+// 	var xor16 []int
+// 	for i := range a {
+// 		xor16 = append(xor16, Xor(a[i], b[i]))
+// 	}
+//
+// 	return xor16
+//
+// }
 
 // TODO Add n-bit adder/xor/or/nand, etc
-func Adder3Way (a, b, c int) (o int) {
-	ab := And(a, b)
-	d := And(ab, c)
-	return d
-}
-func Xor3way(a, b, c int) (o int) {
-	ab := Xor(a, b)
-	d := Xor(ab, c)
-	return d
-}
+// func Adder3Way(a, b, c int) (o int) {
+// 	ab := And(a, b)
+// 	d := And(ab, c)
+// 	return d
+// }
+// func Xor3way(a, b, c int) (o int) {
+// 	ab := Xor(a, b)
+// 	d := Xor(ab, c)
+// 	return d
+// }
 
-func Mux(a, b, sel int) (o int) {
-	sel_a := And(a, Not(sel)) // out=a
-	// 0|0|0||0
-	// 0|1|0||0
-	// 1|0|0||1
-	// 1|1|0||1
-	sel_b := And(b, sel) // out=b
-	// 0|0|1||0
-	// 0|1|1||1
-	// 1|0|1||0
-	// 1|1|1||1
-	return Or(sel_a, sel_b)
-}
-func test_Mux() {
-	fmt.Println("\nMux")
-	a := []int{0, 0, 1, 1, 0, 0, 1, 1}
-	b := []int{0, 1, 0, 1, 0, 1, 0, 1}
-	sel := []int{0, 0, 0, 0, 1, 1, 1, 1}
+// func test_Mux() {
+// 	fmt.Println("\nMux")
+// 	a := []int{0, 0, 1, 1, 0, 0, 1, 1}
+// 	b := []int{0, 1, 0, 1, 0, 1, 0, 1}
+// 	sel := []int{0, 0, 0, 0, 1, 1, 1, 1}
+//
+// 	for i := range sel {
+// 		fmt.Println(a[i], b[i], sel[i], "|", Mux(a[i], b[i], sel[i]))
+// 	}
+// }
 
-	for i := range sel {
-		fmt.Println(a[i], b[i], sel[i], "|", Mux(a[i], b[i], sel[i]))
-	}
-}
+// func AndMuxOr(a, b, sel int) (o int) {
+// 	if sel == 0 {
+// 		return And(a, b)
+// 	}
+// 	return Or(a, b)
+// }
+//
+//
+// func Mux4Way16(a, b, c, d [16]int, sel [2]int) [16]int {
+// 	// in = a,b,c,d, sel_1, sel_2
+// 	// sel_1 | sel_2 || out
+// 	// 0|0||a
+// 	// 0|1||b
+// 	// 1|0||c
+// 	// 1|1||d
+//
+// 	r1 := Mux16(a, b, sel[0])
+// 	r2 := Mux16(c, d, sel[0])
+// 	return Mux16(r1, r2, sel[1])
+// }
 
-func Mux16(a, b [16]int, sel int) (out [16]int) {
-	for i := range a {
-		out[i] = Mux(a[i], b[i], sel)
-	}
-	return out
-}
-
-func AndMuxOr(a, b, sel int) (o int) {
-	if sel == 0 {
-		return And(a, b)
-	}
-	return Or(a, b)
-}
-
-func And16(a, b [16]int) (o [16]int) {
-	var outputs = [16]int{}
-	for i := range a {
-		outputs[i] = And(a[i], b[i])
-	}
-	return outputs
-
-}
-
-func Mux4Way16(a, b, c, d [16]int, sel [2]int) [16]int {
-	// in = a,b,c,d, sel_1, sel_2
-	// sel_1 | sel_2 || out
-	// 0|0||a
-	// 0|1||b
-	// 1|0||c
-	// 1|1||d
-
-	r1 := Mux16(a, b, sel[0])
-	r2 := Mux16(c, d, sel[0])
-	return Mux16(r1, r2, sel[1])
-}
-
-// DMUX
-func DMux(in, sel int) (a, b int) {
-	// s||a|b || (i = (in))
-	// --------
-	// 0||i|0
-	// 1||0|i
-	// --------
-	// 0||0|0
-	// 0||1|0
-	// 1||0|0
-	// 1||0|1
-
-	// If sel == 0 -> out = (in, 0)
-	// out = in , 0
-	// if in = 0 -> 0||0|0
-	// if in = 1 -> 0||1,0 -> And(in, Not(sel))
-
-	// if sel == 1 -> out = (0, in)
-	// out = 0 , in
-	// if in = 0 -> 1||0|0
-	// if in = 1 -> 1||0|1 -> And(in, sel)
-
-	a = And(in, Not(sel))
-	b = And(in, sel)
-	return a, b
-}
-
-func test_DMux() {
-	fmt.Println("\nDMux")
-	sel := []int{0, 1}
-	for i := range sel {
-		a, b := DMux(1, sel[i])
-		fmt.Println(sel[i], "|", a, b)
-	}
-
-}
-
-func DMux4Way(in int, sel [2]int) (a, b, c, d int) {
-	// s1,s0||a,b,c,d
-	// 0,0 || a,0,0,0
-	// 0,1 || 0,b,0,0
-	// 1,0 || 0,0,c,0
-	// 1,1 || 0,0,0,d
-	// ----------
-	// 2xDmux
-	// out=a||b
-	// Not(sel[1]) so that sel1=1
-	ab := And(Not(sel[1]), in)
-	a, b = DMux(ab, sel[0])
-	// out=c||d
-	cd := And(sel[1], in)
-	c, d = DMux(cd, sel[0])
-
-	return a, b, c, d
-}
-
-func test_DMX4W() {
-	fmt.Println("\nDMux4Way")
-	sel1 := []int{
-		0, 0, 1, 1,
-	}
-	sel0 := []int{
-		0, 1, 0, 1,
-	}
-	// a := 1
-	for i := range sel1 {
-		sel := [2]int{sel0[i], sel1[i]}
-		a, b, c, d := DMux4Way(1, sel)
-		fmt.Println(sel, a, b, c, d)
-	}
-}
-
-func DMux8Way(in int, sel [3]int) (a, b, c, d, e, f, g, h int) {
-
-	// ns := Not(sel[2])
-	sel2 := [2]int{sel[0], sel[1]}
-	a, b, c, d = DMux4Way(in, sel2)
-	e, f, g, h = DMux4Way(in, sel2)
-
-	a = And(a, Not(sel[2]))
-	b = And(b, Not(sel[2]))
-	c = And(c, Not(sel[2]))
-	d = And(d, Not(sel[2]))
-	e = And(e, sel[2])
-	f = And(f, sel[2])
-	g = And(g, sel[2])
-	h = And(h, sel[2])
-
-	return a, b, c, d, e, f, g, h
-}
-
-func test_DMX8W() {
-	fmt.Println("\nDMux8Way")
-	// 3,2,1 ||a,b,c,d,e,f,g,h
-	// ----------------------- -> s2 = [sel0, sel1]
-	// 0,0,0 ||i,0,0,0,0,0,0,0 | x,0,0
-	// 0,0,1 ||0,i,0,0,0,0,0,0 | x,0,1
-	// 0,1,0 ||0,0,i,0,0,0,0,0 | x,1,0
-	// 0,1,1 ||0,0,0,i,0,0,0,0 | x.1,1
-	// -----------------------
-	// 1,0,0 ||0,0,0,0,i,0,0,0
-	// 1,0,1 ||0,0,0,0,0,i,0,0
-	// 1,1,0 ||0,0,0,0,0,0,i,0
-	// 1,1,1 ||0,0,0,0,0,0,0,i
-	// -----------------------
-
-	in := 1
-	sel2 := []int{0, 0, 0, 0, 1, 1, 1, 1}
-	sel1 := []int{0, 0, 1, 1, 0, 0, 1, 1}
-	sel0 := []int{0, 1, 0, 1, 0, 1, 0, 1}
-	// a,b,c,d := DMux4Way()
-
-	for i := range sel0 {
-		a, b, c, d, e, f, g, h := DMux8Way(in, [3]int{sel0[i], sel1[i], sel2[i]})
-		fmt.Println(sel0[i], sel1[i], sel2[i], "||", a, b, c, d, e, f, g, h)
-	}
-}
-
+// func test_DMux() {
+// 	fmt.Println("\nDMux")
+// 	sel := []int{0, 1}
+// 	for i := range sel {
+// 		a, b := DMux(1, sel[i])
+// 		fmt.Println(sel[i], "|", a, b)
+// 	}
+//
+// }
+//
+// func DMux4Way(in int, sel [2]int) (a, b, c, d int) {
+// 	// s1,s0||a,b,c,d
+// 	// 0,0 || a,0,0,0
+// 	// 0,1 || 0,b,0,0
+// 	// 1,0 || 0,0,c,0
+// 	// 1,1 || 0,0,0,d
+// 	// ----------
+// 	// 2xDmux
+// 	// out=a||b
+// 	// Not(sel[1]) so that sel1=1
+// 	ab := And(Not(sel[1]), in)
+// 	a, b = DMux(ab, sel[0])
+// 	// out=c||d
+// 	cd := And(sel[1], in)
+// 	c, d = DMux(cd, sel[0])
+//
+// 	return a, b, c, d
+// }
+//
+// func test_DMX4W() {
+// 	fmt.Println("\nDMux4Way")
+// 	sel1 := []int{
+// 		0, 0, 1, 1,
+// 	}
+// 	sel0 := []int{
+// 		0, 1, 0, 1,
+// 	}
+// 	// a := 1
+// 	for i := range sel1 {
+// 		sel := [2]int{sel0[i], sel1[i]}
+// 		a, b, c, d := DMux4Way(1, sel)
+// 		fmt.Println(sel, a, b, c, d)
+// 	}
+// }
+//
+// func DMux8Way(in int, sel [3]int) (a, b, c, d, e, f, g, h int) {
+//
+// 	// ns := Not(sel[2])
+// 	sel2 := [2]int{sel[0], sel[1]}
+// 	a, b, c, d = DMux4Way(in, sel2)
+// 	e, f, g, h = DMux4Way(in, sel2)
+//
+// 	a = And(a, Not(sel[2]))
+// 	b = And(b, Not(sel[2]))
+// 	c = And(c, Not(sel[2]))
+// 	d = And(d, Not(sel[2]))
+// 	e = And(e, sel[2])
+// 	f = And(f, sel[2])
+// 	g = And(g, sel[2])
+// 	h = And(h, sel[2])
+//
+// 	return a, b, c, d, e, f, g, h
+// }
+//
+// func test_DMX8W() {
+// 	fmt.Println("\nDMux8Way")
+// 	// 3,2,1 ||a,b,c,d,e,f,g,h
+// 	// ----------------------- -> s2 = [sel0, sel1]
+// 	// 0,0,0 ||i,0,0,0,0,0,0,0 | x,0,0
+// 	// 0,0,1 ||0,i,0,0,0,0,0,0 | x,0,1
+// 	// 0,1,0 ||0,0,i,0,0,0,0,0 | x,1,0
+// 	// 0,1,1 ||0,0,0,i,0,0,0,0 | x.1,1
+// 	// -----------------------
+// 	// 1,0,0 ||0,0,0,0,i,0,0,0
+// 	// 1,0,1 ||0,0,0,0,0,i,0,0
+// 	// 1,1,0 ||0,0,0,0,0,0,i,0
+// 	// 1,1,1 ||0,0,0,0,0,0,0,i
+// 	// -----------------------
+//
+// 	in := 1
+// 	sel2 := []int{0, 0, 0, 0, 1, 1, 1, 1}
+// 	sel1 := []int{0, 0, 1, 1, 0, 0, 1, 1}
+// 	sel0 := []int{0, 1, 0, 1, 0, 1, 0, 1}
+// 	// a,b,c,d := DMux4Way()
+//
+// 	for i := range sel0 {
+// 		a, b, c, d, e, f, g, h := DMux8Way(in, [3]int{sel0[i], sel1[i], sel2[i]})
+// 		fmt.Println(sel0[i], sel1[i], sel2[i], "||", a, b, c, d, e, f, g, h)
+// 	}
+// }
+//
 // -----------------------------------------
 // ADDERs
 // -----------------------------------------
 
-func HalfAdder(a, b int) (sum, carry int) {
-	//fmt.Println("Half Adder", a, b)
+// func HalfAdder(a, b int) (sum, carry int) {
+// 	//fmt.Println("Half Adder", a, b)
+//
+// 	carry = And(a, b)
+// 	sum = Xor(a, b)
+//
+// 	return sum, carry
+// }
 
-	carry = And(a, b)
-	sum = Xor(a, b)
-
-	return sum, carry
-}
-
-func test_halfadder() {
-	x := []int{0,0,1,1}
-	y := []int{0,1,0,1}
-	
-	fmt.Println("x|y|c|s\n-------")
-	for i := range x {
-		s, c := HalfAdder(x[i], y[i])
-		fmt.Printf("%d|%d|%d|%d\n", x[i], y[i], c, s)
-	}
-}
+// func test_halfadder() {
+// 	x := []int{0, 0, 1, 1}
+// 	y := []int{0, 1, 0, 1}
+//
+// 	fmt.Println("x|y|c|s\n-------")
+// 	for i := range x {
+// 		s, c := HalfAdder(x[i], y[i])
+// 		fmt.Printf("%d|%d|%d|%d\n", x[i], y[i], c, s)
+// 	}
+// }
 
 // Full Adder
-func FullAdder(a, b, c int) (sum, carry int) {
-	s1, c1 := HalfAdder(a, b)
-	s2, c2 := HalfAdder(s1, c)
-	carry = Xor(c1, c2)
-	sum = s2
+// func FullAdder(a, b, c int) (sum, carry int) {
+// 	s1, c1 := HalfAdder(a, b)
+// 	s2, c2 := HalfAdder(s1, c)
+// 	carry = Xor(c1, c2)
+// 	sum = s2
+//
+// 	return sum, carry
+// }
+//
+// func test_fulladder() {
+// 	fmt.Println("Test Full Adder")
+// 	x := []int{0, 0, 0, 0, 1, 1, 1, 1}
+// 	y := []int{0, 0, 1, 1, 0, 0, 1, 1}
+// 	z := []int{0, 1, 0, 1, 0, 1, 0, 1}
+// 	carry := []int{0, 0, 0, 0, 0, 0, 0, 0}
+// 	sum := []int{0, 0, 0, 0, 0, 0, 0, 0, 0}
+//
+// 	fmt.Println("x|y|z||c|s")
+// 	fmt.Println("--------------")
+//
+// 	for i := range x {
+// 		s, c := FullAdder(x[i], y[i], z[i])
+// 		sum[i] = s
+// 		carry[i] = c
+// 		fmt.Printf("%d|%d|%d||%d|%d\n", x[i], y[i], z[i], c, s)
+// 	}
+//
+// 	fmt.Println("---------------------")
+// 	fmt.Println("c= ", reverseSlice(carry), "\nx= ", reverseSlice(x), "\ny= ", reverseSlice(y), "\nz= ", reverseSlice(z), "\n--------------------------", "\ns= ", reverseSlice(sum))
+// }
 
-	return sum, carry
-}
+//
+// func test_Add16() {
+// 	fmt.Println("Test Add16")
+// 	a := [16]int{1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+// 	b := [16]int{0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+//
+// 	sum, carry := Add16(a, b)
+// 	fmt.Println("c= ", carry, "\na= ", a, "\nb= ", b, "\n----------------------------\ns= ", sum)
+// }
 
-func test_fulladder() {
-	fmt.Println("Test Full Adder")
-	x := []int{0,0,0,0,1,1,1,1}
-	y := []int{0,0,1,1,0,0,1,1}
-	z := []int{0,1,0,1,0,1,0,1}
-	carry := []int{0,0,0,0,0,0,0,0}
-	sum := []int{0,0,0,0,0,0,0,0,0}
+// func DFF(d, c int) {
+//
+// 	nand1 := Nand(d, Not(c))
+// 	nand2 := Nand(nand1, Not(c))
+//
+// 	nand3 := Nand(nand1, nand4)
+// 	nand4 := Nand(nand3, nand2)
+//
+// 	nand5 := Nand(nand3, c)
+// 	nand6 := Nand(nand5, c)
+//
+// 	nand7 := Nand(nand4, nand8)
+// 	nand8 := Nand(nand7, nand6)
+//
+// 	fmt.Println(d, c, nand7, nand8)
+// }
 
-	fmt.Println("x|y|z||c|s")
-	fmt.Println("--------------")
-
-	for i := range x {
-		s,c := FullAdder(x[i], y[i], z[i])
-		sum[i] = s
-		carry[i] = c
-		fmt.Printf("%d|%d|%d||%d|%d\n", x[i], y[i], z[i], c, s)
-	}
-
-	fmt.Println("---------------------")
-	fmt.Println("c= ", reverseSlice(carry), "\nx= ",reverseSlice(x), "\ny= ", reverseSlice(y), "\nz= ", reverseSlice(z), "\n--------------------------", "\ns= ", reverseSlice(sum))
-}
-
-func Add16(a, b [16]int) (out, carry [16]int) {
-	// fmt.Println(len(a), "Bit Adder")
-	sum := [16]int{}
-	carry = [16]int{}
-
-	s1, c1 := FullAdder(a[0], b[0], 0)
-	sum[0] = s1
-
-	carry[0] = c1
-	for i := range a {
-		if i > 0 {
-			s1, c1 = FullAdder(a[i], b[i], c1)
-			sum[i] = s1
-			carry[i] = c1
-		}
-	}
-	return sum, carry
-}
-
-func test_Add16() {
-	fmt.Println("Test Add16")
-	a := [16]int{1,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0}
-	b := [16]int{0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
-
-	sum, carry := Add16(a, b)
-	fmt.Println("c= ", carry, "\na= ", a, "\nb= ", b, "\n----------------------------\ns= ", sum)
-}
-
+//func Register(in, load int) (out in) {
+//}
 /*
 func Incrementer(a [16]int) (out [16]int) {
 	b := make([16]int, len(a))
@@ -470,79 +784,3 @@ func Incrementer(a [16]int) (out [16]int) {
 
 }
 */
-
-// ALU performs various arithmetic and logic operations based on control flags.
-func ALU(x, y [16]int, zx, nx, zy, ny, f, no int) (output [16]int) {
-
-	//ZX operation
-	var nxzx = [16]int{}
-	
-	for i := range x {
-		o1 := And(x[i], Not(zx))
-		xo1 := Xor(o1, nx)
-		nxzx[i] = xo1
-	}
-	
-
-	//Zy operation
-	var nyzy = [16]int{}
-	
-	for i := range x {
-		o1 := And(y[i], Not(zy))
-		yo1 := Xor(o1, ny)
-		nyzy[i] = yo1
-	}
-	
-	// Adder function
-	adder, _ := Add16(nxzx, nyzy)
-
-	// Bitwise And
-	bitwise_and := And16(nxzx, nyzy)
-
-	f_out := Mux16(adder, bitwise_and, f)
-
-	var no_out = [16]int{}
-	for i := range f_out {
-		no_out[i] = Xor(f_out[i], no)
-	}
-
-	return no_out
-	
-}
-
-func DFF(d, c int) {
-	
-	nand1 := Nand(d, Not(c))
-	nand2 := Nand(nand1, Not(c))
-
-	nand3 := Nand(nand1, nand4)
-	nand4 := Nand(nand3, nand2)
-
-	nand5 := Nand(nand3, c)
-	nand6 := Nand(nand5, c)
-
-	nand7 := Nand(nand4, nand8)
-	nand8 := Nand(nand7, nand6)
-
-	fmt.Println(d, c, nand7, nand8)
-}
-
-// 1-bit register
-type Bit struct {
-	In	int
-	Load int
-	Out int
-}
-
-//func Register(in, load int) (out in) {
-//}
-
-
-
-
-
-
-
-
-
-
