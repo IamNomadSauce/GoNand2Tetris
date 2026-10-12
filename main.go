@@ -23,6 +23,14 @@ type Circuit struct {
 	parentStack []int
 }
 
+// type Detail int
+//
+// const (
+// 	DetailTop Detail = iota
+// 	DetailMid
+// 	DetailFull
+// )
+
 func NewCircuit() *Circuit {
 	return &Circuit{recording: true}
 }
@@ -164,125 +172,178 @@ func (c *Circuit) Evaluate(inputs map[Signal]int) map[Signal]int {
 
 // ---------- Graphviz with clusters ----------
 
-func (c *Circuit) ToDOT(highLevelOnly bool) string {
+func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 	var b strings.Builder
 	b.WriteString("digraph Circuit {\n")
 	b.WriteString("  rankdir=LR;\n")
 	b.WriteString("  compound=true;\n")
 	b.WriteString("  node [shape=box, style=filled, fillcolor=lightblue];\n")
-	b.WriteString("  edge [arrowsize=0.7];\n")
 
-	// Separate containers (have children) from leaf chips
 	childrenOf := map[int][]Gate{}
-	var leaves []Gate
-	isContainer := map[int]bool{}
-
 	for _, g := range c.Gates {
-		if highLevelOnly && g.Name == "Nand" {
+		if g.Name == "Nand" {
 			continue
 		}
 		childrenOf[g.Parent] = append(childrenOf[g.Parent], g)
 	}
-	for id, kids := range childrenOf {
-		if len(kids) > 0 && id != 0 {
-			isContainer[id] = true
-		}
-	}
-	for _, g := range c.Gates {
-		if highLevelOnly && g.Name == "Nand" {
-			continue
-		}
-		if !isContainer[g.NodeID] {
-			leaves = append(leaves, g)
-		}
-	}
 
-	// Emit clusters + leaf nodes
+	open := map[int]bool{}
+	var consider func(id, depth int)
+	consider = func(id, depth int) {
+		if maxDepth >= 0 && depth > maxDepth {
+			return
+		}
+		kids := childrenOf[id]
+		if len(kids) == 0 || (maxChildren > 0 && len(kids) > maxChildren) {
+			return
+		}
+		open[id] = true
+		for _, k := range kids {
+			consider(k.NodeID, depth+1)
+		}
+	}
+	consider(0, 0)
+
 	var emit func(parent int, indent string)
 	emit = func(parent int, indent string) {
 		for _, g := range childrenOf[parent] {
-			if isContainer[g.NodeID] {
-				b.WriteString(fmt.Sprintf("%ssubgraph cluster_%d {\n", indent, g.NodeID))
-				b.WriteString(fmt.Sprintf("%s  label=\"%s\";\n", indent, g.Name))
-				b.WriteString(fmt.Sprintf("%s  style=filled;\n", indent))
-				b.WriteString(fmt.Sprintf("%s  color=gray;\n", indent))
-				b.WriteString(fmt.Sprintf("%s  fillcolor=lightyellow;\n", indent))
+			if open[g.NodeID] {
+				b.WriteString(indent + "subgraph cluster_" + fmt.Sprint(g.NodeID) + " {\n")
+				b.WriteString(indent + "  label=\"" + g.Name + "\";\n")
+				b.WriteString(indent + "  style=filled;\n")
+				b.WriteString(indent + "  fillcolor=lightyellow;\n")
+				b.WriteString(indent + "  color=gray;\n")
 				emit(g.NodeID, indent+"  ")
 				b.WriteString(indent + "}\n")
 			} else {
-				b.WriteString(fmt.Sprintf("%sg%d [label=\"%s\"];\n", indent, g.NodeID, g.Name))
+				b.WriteString(indent + "g" + fmt.Sprint(g.NodeID) + " [label=\"" + g.Name + "\"];\n")
 			}
 		}
 	}
 	emit(0, "  ")
 
-	// Producer map: only leaf chips produce visible signals
-	producer := map[Signal]int{}
-	for _, g := range leaves {
-		if g.Output != 0 {
-			producer[g.Output] = g.NodeID
-		}
-	}
-
-	// Primary inputs
-	used := map[Signal]bool{}
-	for _, g := range leaves {
-		for _, in := range g.Inputs {
-			if _, ok := producer[in]; !ok {
-				used[in] = true
+	emitted := map[int]bool{}
+	var collect func(parent int)
+	collect = func(parent int) {
+		for _, g := range childrenOf[parent] {
+			if open[g.NodeID] {
+				collect(g.NodeID)
+			} else {
+				emitted[g.NodeID] = true
 			}
 		}
 	}
-	for in := range used {
-		b.WriteString(fmt.Sprintf("  in_%d [label=\"in_%d\", shape=ellipse, fillcolor=lightgreen];\n", in, in))
+	collect(0)
+
+	produced := map[Signal]bool{}
+	for _, g := range c.Gates {
+		if g.Output != 0 {
+			produced[g.Output] = true
+		}
 	}
 
-	// Edges only between visible nodes
-	for _, g := range leaves {
+	primary := map[Signal]bool{}
+	for _, g := range c.Gates {
+		if !emitted[g.NodeID] {
+			continue
+		}
+		for _, in := range g.Inputs {
+			if !produced[in] {
+				primary[in] = true
+			}
+		}
+	}
+	for in := range primary {
+		b.WriteString("  in_" + fmt.Sprint(in) + " [label=\"in_" + fmt.Sprint(in) + "\", shape=ellipse, fillcolor=lightgreen];\n")
+	}
+
+	// Force primary inputs to the left
+	if len(primary) > 0 {
+		b.WriteString("  { rank=source;")
+		for in := range primary {
+			b.WriteString(" in_" + fmt.Sprint(in) + ";")
+		}
+		b.WriteString(" }\n")
+	}
+
+	// Edges
+	producer := map[Signal]int{}
+	for _, g := range c.Gates {
+		if g.Name == "Nand" || g.Output == 0 {
+			continue
+		}
+		// Prefer an emitted leaf; otherwise walk up to the nearest open container
+		if emitted[g.NodeID] {
+			producer[g.Output] = g.NodeID
+			continue
+		}
+		// find nearest visible ancestor
+		anc := g.Parent
+		for anc != 0 {
+			if open[anc] || emitted[anc] {
+				producer[g.Output] = anc
+				break
+			}
+			// move up
+			found := false
+			for _, pg := range c.Gates {
+				if pg.NodeID == anc {
+					anc = pg.Parent
+					found = true
+					break
+				}
+			}
+			if !found {
+				break
+			}
+		}
+	}
+
+	// Edges
+	for _, g := range c.Gates {
+		if !emitted[g.NodeID] {
+			continue
+		}
 		for _, in := range g.Inputs {
 			var src string
 			if nid, ok := producer[in]; ok {
-				src = fmt.Sprintf("g%d", nid)
+				src = "g" + fmt.Sprint(nid)
+			} else if primary[in] {
+				src = "in_" + fmt.Sprint(in)
 			} else {
-				src = fmt.Sprintf("in_%d", in)
+				continue
 			}
-			b.WriteString(fmt.Sprintf("  %s -> g%d;\n", src, g.NodeID))
+			b.WriteString("  " + src + " -> g" + fmt.Sprint(g.NodeID) + ";\n")
 		}
 	}
 
 	b.WriteString("}\n")
 	return b.String()
 }
+
 func main() {
 	c := NewCircuit()
+	a, b, cin := c.alloc(), c.alloc(), c.alloc()
+	sum, cout := c.FullAdder(a, b, cin)
+	c.DebugParents()
 
-	var x, y [16]Signal
-	for i := 0; i < 16; i++ {
-		x[i] = c.alloc()
-		y[i] = c.alloc()
+	fmt.Println("sum", sum, "cout", cout)
+
+	os.WriteFile("d0.dot", []byte(c.ToDOT(0, 20)), 0644)
+	os.WriteFile("d1.dot", []byte(c.ToDOT(1, 20)), 0644)
+	os.WriteFile("d2.dot", []byte(c.ToDOT(2, 20)), 0644)
+	os.WriteFile("d3.dot", []byte(c.ToDOT(3, 20)), 0644)
+	fmt.Println("wrote d0.dot d1.dot d2.dot")
+}
+
+func (c *Circuit) DebugParents() {
+	fmt.Println("NodeID  Name        Parent")
+	for _, g := range c.Gates {
+		if g.Name == "Nand" {
+			continue
+		}
+		fmt.Printf("%-6d  %-10s  %d\n", g.NodeID, g.Name, g.Parent)
 	}
-	zx := c.alloc()
-	nx := c.alloc()
-	zy := c.alloc()
-	ny := c.alloc()
-	f := c.alloc()
-	no := c.alloc()
-
-	out := c.ALU(x, y, zx, nx, zy, ny, f, no)
-
-	// Example: compute x + y (zx=nx=zy=ny=no=0, f=1)
-	inputs := map[Signal]int{
-		zx: 0, nx: 0, zy: 0, ny: 0, f: 1, no: 0,
-	}
-	// set a couple of bits
-	inputs[x[0]] = 1
-	inputs[y[0]] = 1
-
-	vals := c.Evaluate(inputs)
-	fmt.Println("out[0] =", vals[out[0]]) // should be 0 with carry 1 if Add16 is correct
-
-	os.WriteFile("alu.dot", []byte(c.ToDOT(true)), 0644)
-	fmt.Println("Wrote alu.dot")
 }
 
 // 1-bit register
@@ -439,7 +500,6 @@ func (c *Circuit) ALU(x, y [16]Signal, zx, nx, zy, ny, f, no Signal) (output [16
 
 	c.end()
 	return no_out
-
 }
 
 //
