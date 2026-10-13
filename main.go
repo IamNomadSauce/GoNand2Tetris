@@ -23,10 +23,21 @@ type Circuit struct {
 	nextID      int
 	recording   bool
 	parentStack []int
+	names       map[Signal]string
 }
 
 func NewCircuit() *Circuit {
-	return &Circuit{recording: true}
+	return &Circuit{
+		recording: true,
+		names:     make(map[Signal]string),
+	}
+}
+
+func (c *Circuit) name(s Signal, n string) Signal {
+	if n != "" {
+		c.names[s] = n
+	}
+	return s
 }
 
 func (c *Circuit) alloc() Signal {
@@ -187,8 +198,8 @@ func (c *Circuit) Xor16(a, b [16]Signal) (out [16]Signal) {
 
 func (c *Circuit) HalfAdder(a, b Signal) (sum, carry Signal) {
 	c.begin("HalfAdder", []Signal{a, b})
-	carry = c.And(a, b)
-	sum = c.Xor(a, b)
+	carry = c.name(c.And(a, b), "carry")
+	sum = c.name(c.Xor(a, b), "sum")
 	c.end()
 	return sum, carry
 }
@@ -197,8 +208,8 @@ func (c *Circuit) FullAdder(a, b, cin Signal) (sum, cout Signal) {
 	c.begin("FullAdder", []Signal{a, b, cin})
 	s1, c1 := c.HalfAdder(a, b)
 	s2, c2 := c.HalfAdder(s1, cin)
-	cout = c.Or(c1, c2)
-	sum = s2
+	cout = c.name(c.Or(c1, c2), "cout")
+	sum = c.name(s2, "sum")
 	c.end()
 	return sum, cout
 }
@@ -313,7 +324,11 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 		}
 	}
 	for in := range primary {
-		b.WriteString(fmt.Sprintf("  in_%d [label=\"in_%d\", shape=ellipse, fillcolor=lightgreen];\n", in, in))
+		label := fmt.Sprintf("in_%d", in)
+		if n, ok := c.names[in]; ok {
+			label = n
+		}
+		b.WriteString(fmt.Sprintf("  in_%d [label=\"%s\", shape=ellipse, fillcolor=lightgreen];\n", in, label))
 	}
 	if len(primary) > 0 {
 		b.WriteString("  { rank=source;")
@@ -387,33 +402,33 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 	return b.String()
 }
 
-func main() {
-	c := NewCircuit()
-	a, b, cin := c.alloc(), c.alloc(), c.alloc()
-	sum, cout := c.FullAdder(a, b, cin)
-	c.DebugParents()
-
-	fmt.Println("sum", sum, "cout", cout)
-
-	if err := writeDOTPNG("halfadder-d3", c.ToDOT(3, 200)); err != nil {
-		fmt.Println("Error:", err)
-	} else {
-		fmt.Println("Wrote halfadder-d3.dot and halfadder-d3.png")
-	}
-
-	if err := writeDOTPNG("halfadder-d1", c.ToDOT(1, 200)); err != nil {
-		fmt.Println("Error:", err)
-	} else {
-		fmt.Println("Wrote halfadder-d1.dot and halfadder-d1.png")
-	}
-
-	if err := writeDOTPNG("halfadder-d2", c.ToDOT(2, 200)); err != nil {
-		fmt.Println("Error:", err)
-	} else {
-		fmt.Println("Wrote halfadder-d2.dot and halfadder-d2.png")
-	}
-
-}
+// func main() {
+// 	c := NewCircuit()
+// 	a, b, cin := c.name(c.alloc(), "a"), c.name(c.alloc(), "b"), c.name(c.alloc(), "cin")
+// 	sum, cout := c.FullAdder(a, b, cin)
+// 	c.DebugParents()
+//
+// 	fmt.Println("sum", sum, "cout", cout)
+//
+// 	if err := writeDOTPNG("halfadder-d3", c.ToDOT(3, 200)); err != nil {
+// 		fmt.Println("Error:", err)
+// 	} else {
+// 		fmt.Println("Wrote halfadder-d3.dot and halfadder-d3.png")
+// 	}
+//
+// 	if err := writeDOTPNG("halfadder-d1", c.ToDOT(1, 200)); err != nil {
+// 		fmt.Println("Error:", err)
+// 	} else {
+// 		fmt.Println("Wrote halfadder-d1.dot and halfadder-d1.png")
+// 	}
+//
+// 	if err := writeDOTPNG("halfadder-d2", c.ToDOT(2, 200)); err != nil {
+// 		fmt.Println("Error:", err)
+// 	} else {
+// 		fmt.Println("Wrote halfadder-d2.dot and halfadder-d2.png")
+// 	}
+//
+// }
 
 func writeDOTPNG(baseName, dot string) error {
 	dotFile := baseName + ".dot"
@@ -430,63 +445,61 @@ func writeDOTPNG(baseName, dot string) error {
 	return nil
 }
 
-// func main() {
-// 	c := NewCircuit()
-//
-// 	var x, y [16]Signal
-// 	for i := 0; i < 16; i++ {
-// 		x[i] = c.alloc()
-// 		y[i] = c.alloc()
-// 	}
-// 	zx := c.alloc()
-// 	nx := c.alloc()
-// 	zy := c.alloc()
-// 	ny := c.alloc()
-// 	f := c.alloc()
-// 	no := c.alloc()
-//
-// 	_ = c.ALU(x, y, zx, nx, zy, ny, f, no)
-// 	aluID := 0
-// 	for _, g := range c.Gates {
-// 		if g.Name == "ALU" {
-// 			aluID = g.NodeID
-// 			break
-// 		}
-// 	}
-// 	count := 0
-// 	for _, g := range c.Gates {
-// 		if g.Parent == aluID && g.Name != "Nand" {
-// 			count++
-// 		}
-// 	}
-// 	fmt.Println("ALU direct children:", count)
-//
-// 	// low-detail overview
-// 	// os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 30)), 0644)
-// 	os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 200)), 0644)
-// 	os.WriteFile("alu-d1.dot", []byte(c.ToDOT(1, 200)), 0644)
-// 	os.WriteFile("alu-d2.dot", []byte(c.ToDOT(2, 200)), 0644)
-//
-// 	if err := writeDOTPNG("alu-d3", c.ToDOT(3, 200)); err != nil {
-// 		fmt.Println("Error:", err)
-// 	} else {
-// 		fmt.Println("Wrote alu-d3.dot and alu-d3.png")
-// 	}
-//
-// 	if err := writeDOTPNG("alu-d1", c.ToDOT(1, 200)); err != nil {
-// 		fmt.Println("Error:", err)
-// 	} else {
-// 		fmt.Println("Wrote alu-d1.dot and alu-d1.png")
-// 	}
-//
-// 	if err := writeDOTPNG("alu-d2", c.ToDOT(2, 200)); err != nil {
-// 		fmt.Println("Error:", err)
-// 	} else {
-// 		fmt.Println("Wrote alu-d2.dot and alu-d2.png")
-// 	}
-//
-// 	fmt.Println("Wrote alu-d1.dot")
-// }
+func main() {
+	c := NewCircuit()
+
+	var x, y [16]Signal
+	for i := 0; i < 16; i++ {
+		x[i] = c.name(c.alloc(), fmt.Sprintf("x[%d]", i))
+		y[i] = c.name(c.alloc(), fmt.Sprintf("y[%d]", i))
+	}
+	zx := c.name(c.alloc(), "zx")
+	nx := c.name(c.alloc(), "nx")
+	zy := c.name(c.alloc(), "zy")
+	ny := c.name(c.alloc(), "ny")
+	f := c.name(c.alloc(), "f")
+	no := c.name(c.alloc(), "no")
+
+	_ = c.ALU(x, y, zx, nx, zy, ny, f, no)
+	aluID := 0
+	for _, g := range c.Gates {
+		if g.Name == "ALU" {
+			aluID = g.NodeID
+			break
+		}
+	}
+	count := 0
+	for _, g := range c.Gates {
+		if g.Parent == aluID && g.Name != "Nand" {
+			count++
+		}
+	}
+	fmt.Println("ALU direct children:", count)
+
+	// low-detail overview
+	// os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 30)), 0644)
+	os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 200)), 0644)
+	os.WriteFile("alu-d1.dot", []byte(c.ToDOT(1, 200)), 0644)
+	os.WriteFile("alu-d2.dot", []byte(c.ToDOT(2, 200)), 0644)
+
+	if err := writeDOTPNG("alu-d0", c.ToDOT(0, 200)); err != nil {
+		fmt.Println("Error:", err)
+	} else {
+		fmt.Println("Wrote alu-d0.dot and alu-d0.png")
+	}
+
+	if err := writeDOTPNG("alu-d1", c.ToDOT(1, 200)); err != nil {
+		fmt.Println("Error:", err)
+	} else {
+		fmt.Println("Wrote alu-d1.dot and alu-d1.png")
+	}
+
+	if err := writeDOTPNG("alu-d2", c.ToDOT(2, 200)); err != nil {
+		fmt.Println("Error:", err)
+	} else {
+		fmt.Println("Wrote alu-d2.dot and alu-d2.png")
+	}
+}
 
 func (c *Circuit) DebugParents() {
 	fmt.Println("NodeID  Name        Parent")
