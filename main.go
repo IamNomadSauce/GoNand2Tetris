@@ -9,11 +9,12 @@ import (
 type Signal int
 
 type Gate struct {
-	NodeID int
-	Name   string
-	Inputs []Signal
-	Output Signal
-	Parent int // 0 = top-level
+	NodeID     int
+	Name       string
+	Inputs     []Signal
+	Output     Signal
+	Parent     int // 0 = top-level
+	BusSources []int
 }
 
 type Circuit struct {
@@ -39,6 +40,14 @@ func (c *Circuit) alloc() Signal {
 	s := Signal(c.nextID)
 	c.nextID++
 	return s
+}
+
+func (c *Circuit) alloc16(s Signal) [16]Signal {
+	var bus [16]Signal
+	for i := range 16 {
+		bus[i] = s
+	}
+	return bus
 }
 
 func (c *Circuit) currentParent() int {
@@ -101,6 +110,38 @@ func (c *Circuit) end() {
 	}
 }
 
+func (c *Circuit) beginBus(name string, sources ...int) int {
+	node := int(c.alloc())
+	c.Gates = append(c.Gates, Gate{
+		NodeID:     node,
+		Name:       name,
+		BusSources: sources,
+		Parent:     c.currentParent(),
+	})
+
+	c.parentStack = append(c.parentStack, node)
+	return node
+}
+
+func (c *Circuit) producerOf(s Signal) int {
+	for i := len(c.Gates) - 1; i >= 0; i-- {
+		g := c.Gates[i]
+		if g.Output == s || (g.Name != "Nand" && contains(g, s)) {
+			return g.NodeID
+		}
+	}
+	return 0 // primary input
+}
+
+func contains(g Gate, s Signal) bool {
+	for _, in := range g.Inputs {
+		if in == s {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------- Gates ----------
 
 func (c *Circuit) Nand(a, b Signal) Signal { return c.nand(a, b) }
@@ -111,15 +152,27 @@ func (c *Circuit) Not(a Signal) Signal {
 	return c.chip("Not", []Signal{a}, out)
 }
 
+func (c *Circuit) Not16(a [16]Signal) (o [16]Signal) {
+	c.begin("Not16", nil)
+	for i := range 16 {
+		o[i] = c.Not(a[i])
+	}
+	c.end()
+	return o
+}
 func (c *Circuit) And(a, b Signal) Signal {
+	c.begin("And", nil)
 	var out Signal
 	c.quiet(func() { out = c.Not(c.Nand(a, b)) })
+	c.end()
 	return c.chip("And", []Signal{a, b}, out)
 }
 
 func (c *Circuit) Or(a, b Signal) Signal {
+	c.begin("Or", nil)
 	var out Signal
 	c.quiet(func() { out = c.Nand(c.Not(a), c.Not(b)) })
+	c.end()
 	return c.chip("Or", []Signal{a, b}, out)
 }
 
@@ -129,6 +182,18 @@ func (c *Circuit) Xor(a, b Signal) Signal {
 		out = c.Or(c.And(a, c.Not(b)), c.And(b, c.Not(a)))
 	})
 	return c.chip("Xor", []Signal{a, b}, out)
+}
+
+func (c *Circuit) Xor16(a, b [16]Signal) (out [16]Signal) {
+	// ins := make([]Signal, 0, 32)
+	// ins = append(ins, a[:]...)
+	// ins = append(ins, b[:]...)
+	c.begin("Xor16", nil)
+	for i := range 16 {
+		out[i] = c.Xor(a[i], b[i])
+	}
+	c.end()
+	return out
 }
 
 func (c *Circuit) HalfAdder(a, b Signal) (sum, carry Signal) {
@@ -299,21 +364,62 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 		}
 	}
 
-	// Edges
+	// For each collapsed node, collect the signals that truly come from outside it
+	externalIn := map[int]map[Signal]bool{}
 	for _, g := range c.Gates {
-		if !emitted[g.NodeID] {
+		if g.Name == "Nand" || !emitted[g.NodeID] {
 			continue
 		}
-		for _, in := range g.Inputs {
+		// walk every gate that belongs to this component (Parent chain reaches g.NodeID)
+		// and look at its inputs
+		var walk func(id int)
+		walk = func(id int) {
+			for _, child := range c.Gates {
+				if child.Parent != id {
+					continue
+				}
+				for _, in := range child.Inputs {
+					prod, ok := producer[in]
+					// signal is external if its visible producer is not this node
+					// (and not a descendant — but producer already collapsed descendants)
+					if !ok || prod != g.NodeID {
+						if externalIn[g.NodeID] == nil {
+							externalIn[g.NodeID] = map[Signal]bool{}
+						}
+						externalIn[g.NodeID][in] = true
+					}
+				}
+				walk(child.NodeID)
+			}
+		}
+		walk(g.NodeID)
+	}
+
+	type edgeKey struct{ src, dst string }
+	seen := map[edgeKey]struct{}{}
+
+	emitEdge := func(src, dst string) {
+		k := edgeKey{src, dst}
+		if _, ok := seen[k]; ok {
+			return
+		}
+		seen[k] = struct{}{}
+		b.WriteString(fmt.Sprintf("  %s -> %s;\n", src, dst))
+	}
+
+	// Edges into collapsed chips (from the externalIn map you built)
+	for nodeID, sigs := range externalIn {
+		dst := "g" + fmt.Sprint(nodeID)
+		for in := range sigs {
 			var src string
-			if nid, ok := producer[in]; ok {
+			if nid, ok := producer[in]; ok && nid != nodeID {
 				src = "g" + fmt.Sprint(nid)
 			} else if primary[in] {
 				src = "in_" + fmt.Sprint(in)
 			} else {
 				continue
 			}
-			b.WriteString("  " + src + " -> g" + fmt.Sprint(g.NodeID) + ";\n")
+			emitEdge(src, dst)
 		}
 	}
 
@@ -323,17 +429,41 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 
 func main() {
 	c := NewCircuit()
-	a, b, cin := c.alloc(), c.alloc(), c.alloc()
-	sum, cout := c.FullAdder(a, b, cin)
-	c.DebugParents()
 
-	fmt.Println("sum", sum, "cout", cout)
+	var x, y [16]Signal
+	for i := 0; i < 16; i++ {
+		x[i] = c.alloc()
+		y[i] = c.alloc()
+	}
+	zx := c.alloc()
+	nx := c.alloc()
+	zy := c.alloc()
+	ny := c.alloc()
+	f := c.alloc()
+	no := c.alloc()
 
-	os.WriteFile("d0.dot", []byte(c.ToDOT(0, 20)), 0644)
-	os.WriteFile("d1.dot", []byte(c.ToDOT(1, 20)), 0644)
-	os.WriteFile("d2.dot", []byte(c.ToDOT(2, 20)), 0644)
-	os.WriteFile("d3.dot", []byte(c.ToDOT(3, 20)), 0644)
-	fmt.Println("wrote d0.dot d1.dot d2.dot")
+	_ = c.ALU(x, y, zx, nx, zy, ny, f, no)
+	aluID := 0
+	for _, g := range c.Gates {
+		if g.Name == "ALU" {
+			aluID = g.NodeID
+			break
+		}
+	}
+	count := 0
+	for _, g := range c.Gates {
+		if g.Parent == aluID && g.Name != "Nand" {
+			count++
+		}
+	}
+	fmt.Println("ALU direct children:", count)
+
+	// low-detail overview
+	// os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 30)), 0644)
+	os.WriteFile("alu-d1.dot", []byte(c.ToDOT(1, 200)), 0644)
+	os.WriteFile("alu-d2.dot", []byte(c.ToDOT(2, 200)), 0644)
+
+	fmt.Println("Wrote alu-d1.dot")
 }
 
 func (c *Circuit) DebugParents() {
@@ -387,6 +517,9 @@ type Bit struct {
 // }
 
 func (c *Circuit) Add16(a, b [16]Signal) (out, carry [16]Signal) {
+	// ins := make([]Signal, 0, 32)
+	// ins = append(ins, a[:]...)
+	// ins = append(ins, b[:]...)
 	c.begin("Add16", nil)
 	sum := [16]Signal{}
 	carry = [16]Signal{}
@@ -433,12 +566,17 @@ func (c *Circuit) DMux(in, sel Signal) (a, b Signal) {
 }
 
 func (c *Circuit) And16(a, b [16]Signal) (o [16]Signal) {
-	var outputs = [16]Signal{}
-	for i := range a {
-		outputs[i] = c.And(a[i], b[i])
-	}
-	return outputs
+	// flatten the two buses into the Inputs slice for the diagram
+	// ins := make([]Signal, 0, 32)
+	// ins = append(ins, a[:]...)
+	// ins = append(ins, b[:]...)
+	c.begin("And16", nil)
 
+	for i := range 16 {
+		o[i] = c.And(a[i], b[i])
+	}
+	c.end()
+	return o
 }
 
 func (c *Circuit) Mux(a, b, sel Signal) Signal {
@@ -453,53 +591,49 @@ func (c *Circuit) Mux(a, b, sel Signal) Signal {
 	return c.chip("Mux", []Signal{a, b, sel}, out)
 }
 
-func (c *Circuit) Mux16(a, b [16]Signal, sel Signal) (out [16]Signal) {
+func (c *Circuit) Mux16(a, b [16]Signal, sel Signal) (o [16]Signal) {
+	// ins := make([]Signal, 0, 33)
+	// ins = append(ins, a[:]...)
+	// ins = append(ins, b[:]...)
+	// ins = append(ins, sel)
 	c.begin("Mux16", nil)
-	for i := range a {
-		out[i] = c.Mux(a[i], b[i], sel)
+	for i := range 16 {
+		o[i] = c.Mux(a[i], b[i], sel)
 	}
 	c.end()
-	return out
+	return o
 }
 
 // ALU performs various arithmetic and logic operations based on control flags.
-func (c *Circuit) ALU(x, y [16]Signal, zx, nx, zy, ny, f, no Signal) (output [16]Signal) {
+func (c *Circuit) ALU(x, y [16]Signal, zx, nx, zy, ny, f, no Signal) (out [16]Signal) {
 
 	c.begin("ALU", nil)
 
-	//ZX operation
-	var nxzx = [16]Signal{}
+	// Zero x/y
+	zx16 := c.alloc16(zx)
+	zy16 := c.alloc16(zy)
+	notZx := c.Not16(zx16)
+	xZero := c.And16(x, notZx)
+	yZero := c.And16(y, c.Not16(zy16))
 
-	for i := range x {
-		o1 := c.And(x[i], c.Not(zx))
-		xo1 := c.Xor(o1, nx)
-		nxzx[i] = xo1
-	}
+	// Negate x/y
+	nx16 := c.alloc16(nx)
+	ny16 := c.alloc16(ny)
+	xOut := c.Xor16(xZero, nx16)
+	yOut := c.Xor16(yZero, ny16)
 
-	//Zy operation
-	var nyzy = [16]Signal{}
+	//  add or and
+	sum, _ := c.Add16(xOut, yOut)
+	and := c.And16(xOut, yOut)
+	fOut := c.Mux16(and, sum, f)
 
-	for i := range x {
-		o1 := c.And(y[i], c.Not(zy))
-		yo1 := c.Xor(o1, ny)
-		nyzy[i] = yo1
-	}
-
-	// Adder function
-	adder, _ := c.Add16(nxzx, nyzy)
-
-	// Bitwise And
-	bitwise_and := c.And16(nxzx, nyzy)
-
-	f_out := c.Mux16(adder, bitwise_and, f)
-
-	var no_out = [16]Signal{}
-	for i := range f_out {
-		no_out[i] = c.Xor(f_out[i], no)
-	}
+	// negate the output
+	no16 := c.alloc16(no)
+	out = c.Xor16(fOut, no16)
 
 	c.end()
-	return no_out
+	return out
+
 }
 
 //
