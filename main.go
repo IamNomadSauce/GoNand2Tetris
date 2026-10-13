@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -23,14 +24,6 @@ type Circuit struct {
 	recording   bool
 	parentStack []int
 }
-
-// type Detail int
-//
-// const (
-// 	DetailTop Detail = iota
-// 	DetailMid
-// 	DetailFull
-// )
 
 func NewCircuit() *Circuit {
 	return &Circuit{recording: true}
@@ -153,7 +146,7 @@ func (c *Circuit) Not(a Signal) Signal {
 }
 
 func (c *Circuit) Not16(a [16]Signal) (o [16]Signal) {
-	c.begin("Not16", nil)
+	c.begin("Not16", a[:])
 	for i := range 16 {
 		o[i] = c.Not(a[i])
 	}
@@ -161,19 +154,15 @@ func (c *Circuit) Not16(a [16]Signal) (o [16]Signal) {
 	return o
 }
 func (c *Circuit) And(a, b Signal) Signal {
-	c.begin("And", nil)
 	var out Signal
 	c.quiet(func() { out = c.Not(c.Nand(a, b)) })
-	c.end()
 	return c.chip("And", []Signal{a, b}, out)
 }
 
 func (c *Circuit) Or(a, b Signal) Signal {
-	c.begin("Or", nil)
 	var out Signal
 	c.quiet(func() { out = c.Nand(c.Not(a), c.Not(b)) })
-	c.end()
-	return out
+	return c.chip("Or", []Signal{a, b}, out)
 }
 
 func (c *Circuit) Xor(a, b Signal) Signal {
@@ -185,10 +174,10 @@ func (c *Circuit) Xor(a, b Signal) Signal {
 }
 
 func (c *Circuit) Xor16(a, b [16]Signal) (out [16]Signal) {
-	// ins := make([]Signal, 0, 32)
-	// ins = append(ins, a[:]...)
-	// ins = append(ins, b[:]...)
-	c.begin("Xor16", nil)
+	ins := make([]Signal, 0, 32)
+	ins = append(ins, a[:]...)
+	ins = append(ins, b[:]...)
+	c.begin("Xor16", ins)
 	for i := range 16 {
 		out[i] = c.Xor(a[i], b[i])
 	}
@@ -243,7 +232,9 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 	b.WriteString("  rankdir=LR;\n")
 	b.WriteString("  compound=true;\n")
 	b.WriteString("  node [shape=box, style=filled, fillcolor=lightblue];\n")
+	b.WriteString("  edge [arrowsize=0.7];\n")
 
+	// parent → children (skip raw Nands)
 	childrenOf := map[int][]Gate{}
 	for _, g := range c.Gates {
 		if g.Name == "Nand" {
@@ -252,6 +243,7 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 		childrenOf[g.Parent] = append(childrenOf[g.Parent], g)
 	}
 
+	// which nodes become clusters
 	open := map[int]bool{}
 	var consider func(id, depth int)
 	consider = func(id, depth int) {
@@ -269,6 +261,7 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 	}
 	consider(0, 0)
 
+	// emit clusters and leaf boxes
 	var emit func(parent int, indent string)
 	emit = func(parent int, indent string) {
 		for _, g := range childrenOf[parent] {
@@ -287,6 +280,7 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 	}
 	emit(0, "  ")
 
+	// nodes that are actually drawn as boxes
 	emitted := map[int]bool{}
 	var collect func(parent int)
 	collect = func(parent int) {
@@ -300,16 +294,16 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 	}
 	collect(0)
 
+	// primary inputs
 	produced := map[Signal]bool{}
 	for _, g := range c.Gates {
 		if g.Output != 0 {
 			produced[g.Output] = true
 		}
 	}
-
 	primary := map[Signal]bool{}
 	for _, g := range c.Gates {
-		if !emitted[g.NodeID] {
+		if g.Name == "Nand" {
 			continue
 		}
 		for _, in := range g.Inputs {
@@ -319,41 +313,34 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 		}
 	}
 	for in := range primary {
-		b.WriteString("  in_" + fmt.Sprint(in) + " [label=\"in_" + fmt.Sprint(in) + "\", shape=ellipse, fillcolor=lightgreen];\n")
+		b.WriteString(fmt.Sprintf("  in_%d [label=\"in_%d\", shape=ellipse, fillcolor=lightgreen];\n", in, in))
 	}
-
-	// Force primary inputs to the left
 	if len(primary) > 0 {
 		b.WriteString("  { rank=source;")
 		for in := range primary {
-			b.WriteString(" in_" + fmt.Sprint(in) + ";")
+			b.WriteString(fmt.Sprintf(" in_%d;", in))
 		}
 		b.WriteString(" }\n")
 	}
 
-	// Edges
+	// signal → gate that produces it
 	producer := map[Signal]int{}
 	for _, g := range c.Gates {
-		if g.Name == "Nand" || g.Output == 0 {
-			continue
-		}
-		// Prefer an emitted leaf; otherwise walk up to the nearest open container
-		if emitted[g.NodeID] {
+		if g.Output != 0 && g.Name != "Nand" {
 			producer[g.Output] = g.NodeID
-			continue
 		}
-		// find nearest visible ancestor
-		anc := g.Parent
-		for anc != 0 {
-			if open[anc] || emitted[anc] {
-				producer[g.Output] = anc
-				break
+	}
+
+	// nearest emitted (drawn) ancestor of a node
+	emittedOwner := func(id int) int {
+		for id != 0 {
+			if emitted[id] {
+				return id
 			}
-			// move up
 			found := false
-			for _, pg := range c.Gates {
-				if pg.NodeID == anc {
-					anc = pg.Parent
+			for _, g := range c.Gates {
+				if g.NodeID == id {
+					id = g.Parent
 					found = true
 					break
 				}
@@ -362,65 +349,37 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 				break
 			}
 		}
+		return 0
 	}
 
-	// For each collapsed node, collect the signals that truly come from outside it
-	externalIn := map[int]map[Signal]bool{}
+	// edges only between emitted nodes (deduplicated)
+	type ekey struct{ src, dst string }
+	seen := map[ekey]bool{}
+
 	for _, g := range c.Gates {
-		if g.Name == "Nand" || !emitted[g.NodeID] {
+		if !emitted[g.NodeID] || len(g.Inputs) == 0 {
 			continue
 		}
-		// walk every gate that belongs to this component (Parent chain reaches g.NodeID)
-		// and look at its inputs
-		var walk func(id int)
-		walk = func(id int) {
-			for _, child := range c.Gates {
-				if child.Parent != id {
+		dst := "g" + fmt.Sprint(g.NodeID)
+		for _, in := range g.Inputs {
+			var src string
+			if pid, ok := producer[in]; ok {
+				owner := emittedOwner(pid)
+				if owner == 0 || owner == g.NodeID {
 					continue
 				}
-				for _, in := range child.Inputs {
-					prod, ok := producer[in]
-					// signal is external if its visible producer is not this node
-					// (and not a descendant — but producer already collapsed descendants)
-					if !ok || prod != g.NodeID {
-						if externalIn[g.NodeID] == nil {
-							externalIn[g.NodeID] = map[Signal]bool{}
-						}
-						externalIn[g.NodeID][in] = true
-					}
-				}
-				walk(child.NodeID)
-			}
-		}
-		walk(g.NodeID)
-	}
-
-	type edgeKey struct{ src, dst string }
-	seen := map[edgeKey]struct{}{}
-
-	emitEdge := func(src, dst string) {
-		k := edgeKey{src, dst}
-		if _, ok := seen[k]; ok {
-			return
-		}
-		seen[k] = struct{}{}
-		b.WriteString(fmt.Sprintf("  %s -> %s;\n", src, dst))
-	}
-
-	// Edges into collapsed chips (from the externalIn map you built)
-	for nodeID, sigs := range externalIn {
-		dst := "g" + fmt.Sprint(nodeID)
-		for in := range sigs {
-			var src string
-			if nid, ok := producer[in]; ok && nid != nodeID {
-				src = "g" + fmt.Sprint(nid)
+				src = "g" + fmt.Sprint(owner)
 			} else if primary[in] {
 				src = "in_" + fmt.Sprint(in)
 			} else {
 				continue
 			}
-
-			emitEdge(src, dst)
+			k := ekey{src, dst}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			b.WriteString(fmt.Sprintf("  %s -> %s;\n", src, dst))
 		}
 	}
 
@@ -436,10 +395,39 @@ func main() {
 
 	fmt.Println("sum", sum, "cout", cout)
 
-	os.WriteFile("d0.dot", []byte(c.ToDOT(0, 20)), 0644)
-	os.WriteFile("d1.dot", []byte(c.ToDOT(1, 20)), 0644)
-	os.WriteFile("d2.dot", []byte(c.ToDOT(2, 20)), 0644)
-	fmt.Println("wrote d0.dot d1.dot d2.dot")
+	if err := writeDOTPNG("halfadder-d3", c.ToDOT(3, 200)); err != nil {
+		fmt.Println("Error:", err)
+	} else {
+		fmt.Println("Wrote halfadder-d3.dot and halfadder-d3.png")
+	}
+
+	if err := writeDOTPNG("halfadder-d1", c.ToDOT(1, 200)); err != nil {
+		fmt.Println("Error:", err)
+	} else {
+		fmt.Println("Wrote halfadder-d1.dot and halfadder-d1.png")
+	}
+
+	if err := writeDOTPNG("halfadder-d2", c.ToDOT(2, 200)); err != nil {
+		fmt.Println("Error:", err)
+	} else {
+		fmt.Println("Wrote halfadder-d2.dot and halfadder-d2.png")
+	}
+
+}
+
+func writeDOTPNG(baseName, dot string) error {
+	dotFile := baseName + ".dot"
+	pngFile := baseName + ".png"
+
+	if err := os.WriteFile(dotFile, []byte(dot), 0644); err != nil {
+		return fmt.Errorf("write %s: %w", dotFile, err)
+	}
+
+	cmd := exec.Command("dot", "-Tpng", dotFile, "-o", pngFile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("dot failed: %w\n%s", err, out)
+	}
+	return nil
 }
 
 // func main() {
@@ -478,6 +466,24 @@ func main() {
 // 	os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 200)), 0644)
 // 	os.WriteFile("alu-d1.dot", []byte(c.ToDOT(1, 200)), 0644)
 // 	os.WriteFile("alu-d2.dot", []byte(c.ToDOT(2, 200)), 0644)
+//
+// 	if err := writeDOTPNG("alu-d3", c.ToDOT(3, 200)); err != nil {
+// 		fmt.Println("Error:", err)
+// 	} else {
+// 		fmt.Println("Wrote alu-d3.dot and alu-d3.png")
+// 	}
+//
+// 	if err := writeDOTPNG("alu-d1", c.ToDOT(1, 200)); err != nil {
+// 		fmt.Println("Error:", err)
+// 	} else {
+// 		fmt.Println("Wrote alu-d1.dot and alu-d1.png")
+// 	}
+//
+// 	if err := writeDOTPNG("alu-d2", c.ToDOT(2, 200)); err != nil {
+// 		fmt.Println("Error:", err)
+// 	} else {
+// 		fmt.Println("Wrote alu-d2.dot and alu-d2.png")
+// 	}
 //
 // 	fmt.Println("Wrote alu-d1.dot")
 // }
@@ -533,10 +539,10 @@ type Bit struct {
 // }
 
 func (c *Circuit) Add16(a, b [16]Signal) (out, carry [16]Signal) {
-	// ins := make([]Signal, 0, 32)
-	// ins = append(ins, a[:]...)
-	// ins = append(ins, b[:]...)
-	c.begin("Add16", nil)
+	ins := make([]Signal, 0, 32)
+	ins = append(ins, a[:]...)
+	ins = append(ins, b[:]...)
+	c.begin("Add16", ins)
 	sum := [16]Signal{}
 	carry = [16]Signal{}
 
@@ -583,10 +589,10 @@ func (c *Circuit) DMux(in, sel Signal) (a, b Signal) {
 
 func (c *Circuit) And16(a, b [16]Signal) (o [16]Signal) {
 	// flatten the two buses into the Inputs slice for the diagram
-	// ins := make([]Signal, 0, 32)
-	// ins = append(ins, a[:]...)
-	// ins = append(ins, b[:]...)
-	c.begin("And16", nil)
+	ins := make([]Signal, 0, 32)
+	ins = append(ins, a[:]...)
+	ins = append(ins, b[:]...)
+	c.begin("And16", ins)
 
 	for i := range 16 {
 		o[i] = c.And(a[i], b[i])
@@ -608,11 +614,11 @@ func (c *Circuit) Mux(a, b, sel Signal) Signal {
 }
 
 func (c *Circuit) Mux16(a, b [16]Signal, sel Signal) (o [16]Signal) {
-	// ins := make([]Signal, 0, 33)
-	// ins = append(ins, a[:]...)
-	// ins = append(ins, b[:]...)
-	// ins = append(ins, sel)
-	c.begin("Mux16", nil)
+	ins := make([]Signal, 0, 33)
+	ins = append(ins, a[:]...)
+	ins = append(ins, b[:]...)
+	ins = append(ins, sel)
+	c.begin("Mux16", ins)
 	for i := range 16 {
 		o[i] = c.Mux(a[i], b[i], sel)
 	}
@@ -622,8 +628,12 @@ func (c *Circuit) Mux16(a, b [16]Signal, sel Signal) (o [16]Signal) {
 
 // ALU performs various arithmetic and logic operations based on control flags.
 func (c *Circuit) ALU(x, y [16]Signal, zx, nx, zy, ny, f, no Signal) (out [16]Signal) {
+	ins := make([]Signal, 0, 38)
+	ins = append(ins, x[:]...)
+	ins = append(ins, y[:]...)
+	ins = append(ins, zx, nx, zy, ny, f, no)
 
-	c.begin("ALU", nil)
+	c.begin("ALU", ins)
 
 	// Zero x/y
 	zx16 := c.alloc16(zx)
