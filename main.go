@@ -173,7 +173,7 @@ func (c *Circuit) Or(a, b Signal) Signal {
 	var out Signal
 	c.quiet(func() { out = c.Nand(c.Not(a), c.Not(b)) })
 	c.end()
-	return c.chip("Or", []Signal{a, b}, out)
+	return out
 }
 
 func (c *Circuit) Xor(a, b Signal) Signal {
@@ -419,6 +419,7 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 			} else {
 				continue
 			}
+
 			emitEdge(src, dst)
 		}
 	}
@@ -429,42 +430,57 @@ func (c *Circuit) ToDOT(maxDepth, maxChildren int) string {
 
 func main() {
 	c := NewCircuit()
+	a, b, cin := c.alloc(), c.alloc(), c.alloc()
+	sum, cout := c.FullAdder(a, b, cin)
+	c.DebugParents()
 
-	var x, y [16]Signal
-	for i := 0; i < 16; i++ {
-		x[i] = c.alloc()
-		y[i] = c.alloc()
-	}
-	zx := c.alloc()
-	nx := c.alloc()
-	zy := c.alloc()
-	ny := c.alloc()
-	f := c.alloc()
-	no := c.alloc()
+	fmt.Println("sum", sum, "cout", cout)
 
-	_ = c.ALU(x, y, zx, nx, zy, ny, f, no)
-	aluID := 0
-	for _, g := range c.Gates {
-		if g.Name == "ALU" {
-			aluID = g.NodeID
-			break
-		}
-	}
-	count := 0
-	for _, g := range c.Gates {
-		if g.Parent == aluID && g.Name != "Nand" {
-			count++
-		}
-	}
-	fmt.Println("ALU direct children:", count)
-
-	// low-detail overview
-	// os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 30)), 0644)
-	os.WriteFile("alu-d1.dot", []byte(c.ToDOT(1, 200)), 0644)
-	os.WriteFile("alu-d2.dot", []byte(c.ToDOT(2, 200)), 0644)
-
-	fmt.Println("Wrote alu-d1.dot")
+	os.WriteFile("d0.dot", []byte(c.ToDOT(0, 20)), 0644)
+	os.WriteFile("d1.dot", []byte(c.ToDOT(1, 20)), 0644)
+	os.WriteFile("d2.dot", []byte(c.ToDOT(2, 20)), 0644)
+	fmt.Println("wrote d0.dot d1.dot d2.dot")
 }
+
+// func main() {
+// 	c := NewCircuit()
+//
+// 	var x, y [16]Signal
+// 	for i := 0; i < 16; i++ {
+// 		x[i] = c.alloc()
+// 		y[i] = c.alloc()
+// 	}
+// 	zx := c.alloc()
+// 	nx := c.alloc()
+// 	zy := c.alloc()
+// 	ny := c.alloc()
+// 	f := c.alloc()
+// 	no := c.alloc()
+//
+// 	_ = c.ALU(x, y, zx, nx, zy, ny, f, no)
+// 	aluID := 0
+// 	for _, g := range c.Gates {
+// 		if g.Name == "ALU" {
+// 			aluID = g.NodeID
+// 			break
+// 		}
+// 	}
+// 	count := 0
+// 	for _, g := range c.Gates {
+// 		if g.Parent == aluID && g.Name != "Nand" {
+// 			count++
+// 		}
+// 	}
+// 	fmt.Println("ALU direct children:", count)
+//
+// 	// low-detail overview
+// 	// os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 30)), 0644)
+// 	os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 200)), 0644)
+// 	os.WriteFile("alu-d1.dot", []byte(c.ToDOT(1, 200)), 0644)
+// 	os.WriteFile("alu-d2.dot", []byte(c.ToDOT(2, 200)), 0644)
+//
+// 	fmt.Println("Wrote alu-d1.dot")
+// }
 
 func (c *Circuit) DebugParents() {
 	fmt.Println("NodeID  Name        Parent")
