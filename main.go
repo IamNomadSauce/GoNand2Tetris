@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,7 +17,8 @@ type Gate struct {
 	Name       string
 	Inputs     []Signal
 	Output     Signal
-	Parent     int // 0 = top-level
+	Outputs    []Signal // all output signals (chips with 1..n outputs)
+	Parent     int      // 0 = top-level
 	BusSources []int
 }
 
@@ -22,7 +26,8 @@ type Circuit struct {
 	Gates       []Gate
 	nextID      int
 	recording   bool
-	parentStack []int
+	parentStack []int // every scope (recorded or hidden abstraction)
+	visStack    []int // innermost *recorded* chip scope; raw Nands attach here
 	names       map[Signal]string
 }
 
@@ -61,29 +66,26 @@ func (c *Circuit) currentParent() int {
 	return c.parentStack[len(c.parentStack)-1]
 }
 
+// currentTopNode returns the node id of the innermost recorded scope (0 = none).
+func (c *Circuit) currentTopNode() int {
+	if len(c.visStack) == 0 {
+		return 0
+	}
+	return c.visStack[len(c.visStack)-1]
+}
+
 func (c *Circuit) nand(a, b Signal) Signal {
 	out := c.alloc()
+	parent := 0
+	if len(c.visStack) > 0 {
+		parent = c.visStack[len(c.visStack)-1]
+	}
 	c.Gates = append(c.Gates, Gate{
 		NodeID: int(out),
 		Name:   "Nand",
 		Inputs: []Signal{a, b},
 		Output: out,
-		Parent: c.currentParent(),
-	})
-	return out
-}
-
-func (c *Circuit) chip(name string, inputs []Signal, out Signal) Signal {
-	if !c.recording {
-		return out
-	}
-	node := int(c.alloc())
-	c.Gates = append(c.Gates, Gate{
-		NodeID: node,
-		Name:   name,
-		Inputs: inputs,
-		Output: out,
-		Parent: c.currentParent(),
+		Parent: parent,
 	})
 	return out
 }
@@ -95,22 +97,47 @@ func (c *Circuit) quiet(fn func()) {
 	c.recording = old
 }
 
-// begin a hierarchical chip; returns the node ID to push
+// begin a hierarchical chip; returns the node ID to push.
+// The node is recorded as a box only when recording is on, but the scope is
+// always pushed so nested builder calls stay inside the chip.
 func (c *Circuit) begin(name string, inputs []Signal) int {
 	node := int(c.alloc())
-	c.Gates = append(c.Gates, Gate{
-		NodeID: node,
-		Name:   name,
-		Inputs: inputs,
-		Parent: c.currentParent(),
-	})
+	if c.recording {
+		c.Gates = append(c.Gates, Gate{
+			NodeID: node,
+			Name:   name,
+			Inputs: inputs,
+			Parent: c.currentParent(),
+		})
+		c.visStack = append(c.visStack, node)
+	}
 	c.parentStack = append(c.parentStack, node)
 	return node
 }
 
-func (c *Circuit) end() {
-	if len(c.parentStack) > 0 {
+// end closes the scope opened by begin(id) and attaches output signals.
+func (c *Circuit) end(id int, outs ...Signal) {
+	// pop parentStack back down to the begin id (should be the top entry)
+	for len(c.parentStack) > 0 && c.parentStack[len(c.parentStack)-1] != id {
 		c.parentStack = c.parentStack[:len(c.parentStack)-1]
+	}
+	if len(c.parentStack) > 0 && c.parentStack[len(c.parentStack)-1] == id {
+		c.parentStack = c.parentStack[:len(c.parentStack)-1]
+	}
+	// pop the recorded-scope stack if it was pushed for this id
+	if len(c.visStack) > 0 && c.visStack[len(c.visStack)-1] == id {
+		c.visStack = c.visStack[:len(c.visStack)-1]
+	}
+	if len(outs) > 0 {
+		for i := range c.Gates {
+			if c.Gates[i].NodeID == id {
+				c.Gates[i].Outputs = outs
+				if len(outs) == 1 {
+					c.Gates[i].Output = outs[0]
+				}
+				break
+			}
+		}
 	}
 }
 
@@ -151,66 +178,74 @@ func contains(g Gate, s Signal) bool {
 func (c *Circuit) Nand(a, b Signal) Signal { return c.nand(a, b) }
 
 func (c *Circuit) Not(a Signal) Signal {
+	id := c.begin("Not", []Signal{a})
 	var out Signal
 	c.quiet(func() { out = c.Nand(a, a) })
-	return c.chip("Not", []Signal{a}, out)
+	c.end(id, out)
+	return out
 }
 
 func (c *Circuit) Not16(a [16]Signal) (o [16]Signal) {
-	c.begin("Not16", a[:])
+	id := c.begin("Not16", a[:])
 	for i := range 16 {
 		o[i] = c.Not(a[i])
 	}
-	c.end()
+	c.end(id, o[:]...)
 	return o
 }
 func (c *Circuit) And(a, b Signal) Signal {
+	id := c.begin("And", []Signal{a, b})
 	var out Signal
 	c.quiet(func() { out = c.Not(c.Nand(a, b)) })
-	return c.chip("And", []Signal{a, b}, out)
+	c.end(id, out)
+	return out
 }
 
 func (c *Circuit) Or(a, b Signal) Signal {
+	id := c.begin("Or", []Signal{a, b})
 	var out Signal
 	c.quiet(func() { out = c.Nand(c.Not(a), c.Not(b)) })
-	return c.chip("Or", []Signal{a, b}, out)
+	c.end(id, out)
+	return out
 }
 
 func (c *Circuit) Xor(a, b Signal) Signal {
+	id := c.begin("Xor", []Signal{a, b})
 	var out Signal
 	c.quiet(func() {
 		out = c.Or(c.And(a, c.Not(b)), c.And(b, c.Not(a)))
 	})
-	return c.chip("Xor", []Signal{a, b}, out)
+	c.end(id, out)
+	return out
 }
 
 func (c *Circuit) Xor16(a, b [16]Signal) (out [16]Signal) {
 	ins := make([]Signal, 0, 32)
 	ins = append(ins, a[:]...)
 	ins = append(ins, b[:]...)
-	c.begin("Xor16", ins)
+	id := c.begin("Xor16", ins)
 	for i := range 16 {
 		out[i] = c.Xor(a[i], b[i])
 	}
-	c.end()
+	c.end(id, out[:]...)
 	return out
 }
 
 func (c *Circuit) HalfAdder(a, b Signal) (sum, carry Signal) {
-	c.begin("HalfAdder", []Signal{a, b})
+	id := c.begin("HalfAdder", []Signal{a, b})
 	carry = c.name(c.And(a, b), "carry")
 	sum = c.name(c.Xor(a, b), "sum")
-	c.end()
+	c.end(id, sum, carry)
 	return sum, carry
 }
 
 func (c *Circuit) FullAdder(a, b, cin Signal) (sum, cout Signal) {
-	c.begin("FullAdder", []Signal{a, b, cin})
+	id := c.begin("FullAdder", []Signal{a, b, cin})
 	s1, c1 := c.HalfAdder(a, b)
 	s2, c2 := c.HalfAdder(s1, cin)
 	cout = c.name(c.Or(c1, c2), "cout")
 	sum = c.name(s2, "sum")
-	c.end()
+	c.end(id, sum, cout)
 	return sum, cout
 }
 
@@ -234,6 +269,133 @@ func (c *Circuit) Evaluate(inputs map[Signal]int) map[Signal]int {
 	}
 	return vals
 }
+
+// ---------- JSON export for the interactive viewer ----------
+
+type NodeJSON struct {
+	ID        int    `json:"id"`
+	Name      string `json:"name"`
+	Parent    int    `json:"parent"`
+	Inputs    []int  `json:"inputs,omitempty"`
+	Outputs   []int  `json:"outputs,omitempty"`
+	NandCount int    `json:"nandCount,omitempty"`
+	Depth     int    `json:"depth,omitempty"`
+	IsNand    bool   `json:"isNand,omitempty"`
+}
+
+type CircuitJSON struct {
+	Name        string         `json:"name"`
+	Nodes       []NodeJSON     `json:"nodes"`
+	SignalNames map[int]string `json:"signalNames"`
+	Outputs     []int          `json:"outputs"`
+}
+
+type BundleJSON struct {
+	Circuits []CircuitJSON `json:"circuits"`
+}
+
+// ToJSON serializes the whole gate tree (including raw Nand probes) for the
+// canvas viewer. Node order is preserved so the JS side can evaluate the
+// netlist with a single in-order pass, just like Evaluate does.
+func (c *Circuit) ToJSON(name string) CircuitJSON {
+	// childrenOf over all gates (Nands included) for subtree stats
+	childrenOf := map[int][]int{}
+	byID := map[int]*Gate{}
+	for i := range c.Gates {
+		g := &c.Gates[i]
+		byID[g.NodeID] = g
+		childrenOf[g.Parent] = append(childrenOf[g.Parent], g.NodeID)
+	}
+
+	nandCount := map[int]int{}
+	depth := map[int]int{}
+	var walk func(id int) (int, int)
+	walk = func(id int) (int, int) {
+		if v, ok := nandCount[id]; ok {
+			return v, depth[id]
+		}
+		nand, d := 0, 0
+		for _, kid := range childrenOf[id] {
+			kg := byID[kid]
+			if isNandGate(kg) {
+				nand++
+			} else {
+				cn, cd := walk(kid)
+				nand += cn
+				if cd > d {
+					d = cd
+				}
+			}
+		}
+		d++
+		if isNandGate(byID[id]) {
+			// primitives report themselves as leaves
+			nand, d = 1, 0
+		}
+		nandCount[id] = nand
+		depth[id] = d
+		return nand, d
+	}
+	for i := range c.Gates {
+		walk(c.Gates[i].NodeID)
+	}
+
+	out := CircuitJSON{
+		Name:        name,
+		Nodes:       make([]NodeJSON, 0, len(c.Gates)),
+		SignalNames: make(map[int]string, len(c.names)),
+	}
+	for i := range c.Gates {
+		g := &c.Gates[i]
+		outs := g.Outputs
+		if outs == nil && g.Output != 0 {
+			outs = []Signal{g.Output}
+		}
+		if isNandGate(g) {
+			outs = []Signal{g.Output}
+		}
+		nj := NodeJSON{
+			ID:        g.NodeID,
+			Name:      g.Name,
+			Parent:    g.Parent,
+			NandCount: nandCount[g.NodeID],
+			Depth:     depth[g.NodeID],
+			IsNand:    isNandGate(g),
+		}
+		if len(g.Inputs) > 0 {
+			ins := make([]int, len(g.Inputs))
+			for j, s := range g.Inputs {
+				ins[j] = int(s)
+			}
+			nj.Inputs = ins
+		}
+		if !nj.IsNand && len(outs) > 0 {
+			os := make([]int, len(outs))
+			for j, s := range outs {
+				os[j] = int(s)
+			}
+			nj.Outputs = os
+		}
+		if nj.IsNand && g.Output != 0 {
+			nj.Outputs = []int{int(g.Output)}
+		}
+		out.Nodes = append(out.Nodes, nj)
+	}
+	for sig, nm := range c.names {
+		out.SignalNames[int(sig)] = nm
+	}
+	// root outputs: outputs of every top-level node
+	for _, g := range c.Gates {
+		if g.Parent == 0 && g.Name != "Nand" {
+			for _, s := range g.Outputs {
+				out.Outputs = append(out.Outputs, int(s))
+			}
+		}
+	}
+	return out
+}
+
+func isNandGate(g *Gate) bool { return g.Name == "Nand" }
 
 // ---------- Graphviz with clusters ----------
 
@@ -445,9 +607,56 @@ func writeDOTPNG(baseName, dot string) error {
 	return nil
 }
 
-func main() {
-	c := NewCircuit()
+// ---------- Sample circuits ----------
 
+func buildHalfAdder() *Circuit {
+	c := NewCircuit()
+	a := c.name(c.alloc(), "a")
+	b := c.name(c.alloc(), "b")
+	_, _ = c.HalfAdder(a, b)
+	return c
+}
+
+func buildFullAdder() *Circuit {
+	c := NewCircuit()
+	a := c.name(c.alloc(), "a")
+	b := c.name(c.alloc(), "b")
+	cin := c.name(c.alloc(), "cin")
+	_, _ = c.FullAdder(a, b, cin)
+	return c
+}
+
+func buildAdd16() *Circuit {
+	c := NewCircuit()
+	var a, b [16]Signal
+	for i := range 16 {
+		a[i] = c.name(c.alloc(), fmt.Sprintf("a[%d]", i))
+		b[i] = c.name(c.alloc(), fmt.Sprintf("b[%d]", i))
+	}
+	sum, _ := c.Add16(a, b)
+	for i := range sum {
+		c.name(sum[i], fmt.Sprintf("sum[%d]", i))
+	}
+	return c
+}
+
+func buildMux16() *Circuit {
+	c := NewCircuit()
+	var a, b [16]Signal
+	for i := range 16 {
+		a[i] = c.name(c.alloc(), fmt.Sprintf("a[%d]", i))
+		b[i] = c.name(c.alloc(), fmt.Sprintf("b[%d]", i))
+	}
+	sel := c.name(c.alloc(), "sel")
+	out := c.Mux16(a, b, sel)
+	for i := range out {
+		c.name(out[i], fmt.Sprintf("out[%d]", i))
+	}
+	return c
+}
+
+func buildALU() *Circuit {
+	c := NewCircuit()
 	var x, y [16]Signal
 	for i := 0; i < 16; i++ {
 		x[i] = c.name(c.alloc(), fmt.Sprintf("x[%d]", i))
@@ -460,45 +669,107 @@ func main() {
 	f := c.name(c.alloc(), "f")
 	no := c.name(c.alloc(), "no")
 
-	_ = c.ALU(x, y, zx, nx, zy, ny, f, no)
-	aluID := 0
-	for _, g := range c.Gates {
-		if g.Name == "ALU" {
-			aluID = g.NodeID
-			break
+	out := c.ALU(x, y, zx, nx, zy, ny, f, no)
+	for i := range out {
+		c.name(out[i], fmt.Sprintf("out[%d]", i))
+	}
+	return c
+}
+
+func buildBundle() BundleJSON {
+	type named struct {
+		name string
+		c    *Circuit
+	}
+	defs := []named{
+		{"ALU", buildALU()},
+		{"Add16", buildAdd16()},
+		{"Mux16", buildMux16()},
+		{"FullAdder", buildFullAdder()},
+		{"HalfAdder", buildHalfAdder()},
+	}
+	bundle := BundleJSON{}
+	for _, d := range defs {
+		bundle.Circuits = append(bundle.Circuits, d.c.ToJSON(d.name))
+	}
+	return bundle
+}
+
+// ---------- Serve ----------
+
+func serve(port int) {
+	payload, err := json.MarshalIndent(buildBundle(), "", "  ")
+	if err != nil {
+		fmt.Println("Error marshaling circuits:", err)
+		return
+	}
+
+	indexBytes, err := os.ReadFile("./viewer/index.html")
+	if err != nil {
+		fmt.Println("Error reading viewer/index.html:", err)
+		return
+	}
+	injected := strings.Replace(string(indexBytes),
+		"</head>",
+		"<script>window.EMBEDDED_CIRCUITS = "+string(payload)+";</script>\n</head>",
+		1)
+	if injected == string(indexBytes) {
+		fmt.Println("warning: could not inject circuit data into index.html")
+	}
+
+	http.HandleFunc("/circuit.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(payload)
+	})
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			path := "./viewer" + r.URL.Path
+			if _, err := os.Stat(path); err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			http.ServeFile(w, r, path)
+			return
 		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(injected))
+	})
+
+	addr := fmt.Sprintf("localhost:%d", port)
+	fmt.Printf("circuit viewer: http://%s\n", addr)
+	fmt.Printf("circuit data:   http://%s/circuit.json\n", addr)
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		fmt.Println("Error:", err)
 	}
-	count := 0
-	for _, g := range c.Gates {
-		if g.Parent == aluID && g.Name != "Nand" {
-			count++
+}
+
+func main() {
+	dotMode := flag.Bool("dot", false, "legacy: write .dot/.png files instead of serving the viewer")
+	port := flag.Int("port", 8080, "port for the viewer server")
+	flag.Parse()
+
+	if *dotMode {
+		c := buildALU()
+		if err := writeDOTPNG("alu-d0", c.ToDOT(0, 200)); err != nil {
+			fmt.Println("Error:", err)
+		} else {
+			fmt.Println("Wrote alu-d0.dot and alu-d0.png")
 		}
-	}
-	fmt.Println("ALU direct children:", count)
-
-	// low-detail overview
-	// os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 30)), 0644)
-	os.WriteFile("alu-d0.dot", []byte(c.ToDOT(0, 200)), 0644)
-	os.WriteFile("alu-d1.dot", []byte(c.ToDOT(1, 200)), 0644)
-	os.WriteFile("alu-d2.dot", []byte(c.ToDOT(2, 200)), 0644)
-
-	if err := writeDOTPNG("alu-d0", c.ToDOT(0, 200)); err != nil {
-		fmt.Println("Error:", err)
-	} else {
-		fmt.Println("Wrote alu-d0.dot and alu-d0.png")
+		if err := writeDOTPNG("alu-d1", c.ToDOT(1, 200)); err != nil {
+			fmt.Println("Error:", err)
+		} else {
+			fmt.Println("Wrote alu-d1.dot and alu-d1.png")
+		}
+		if err := writeDOTPNG("alu-d2", c.ToDOT(2, 200)); err != nil {
+			fmt.Println("Error:", err)
+		} else {
+			fmt.Println("Wrote alu-d2.dot and alu-d2.png")
+		}
+		return
 	}
 
-	if err := writeDOTPNG("alu-d1", c.ToDOT(1, 200)); err != nil {
-		fmt.Println("Error:", err)
-	} else {
-		fmt.Println("Wrote alu-d1.dot and alu-d1.png")
-	}
-
-	if err := writeDOTPNG("alu-d2", c.ToDOT(2, 200)); err != nil {
-		fmt.Println("Error:", err)
-	} else {
-		fmt.Println("Wrote alu-d2.dot and alu-d2.png")
-	}
+	serve(*port)
 }
 
 func (c *Circuit) DebugParents() {
@@ -555,48 +826,30 @@ func (c *Circuit) Add16(a, b [16]Signal) (out, carry [16]Signal) {
 	ins := make([]Signal, 0, 32)
 	ins = append(ins, a[:]...)
 	ins = append(ins, b[:]...)
-	c.begin("Add16", ins)
-	sum := [16]Signal{}
+	id := c.begin("Add16", ins)
+	out = [16]Signal{}
 	carry = [16]Signal{}
 
-	s1, c1 := c.FullAdder(a[0], b[0], 0)
-	sum[0] = s1
-
-	carry[0] = c1
-	for i := range a {
-		if i > 0 {
-			s1, c1 = c.FullAdder(a[i], b[i], c1)
-			sum[i] = s1
-			carry[i] = c1
-		}
+	// Hack buses are MSB-first (x[0] = most significant bit), so the carry
+	// chain runs from the least significant bit (index 15) toward index 0.
+	cin0 := c.alloc() // un-driven signal = constant 0
+	s1, c1 := c.FullAdder(a[15], b[15], cin0)
+	out[15] = s1
+	carry[15] = c1
+	for i := 14; i >= 0; i-- {
+		s1, c1 = c.FullAdder(a[i], b[i], c1)
+		out[i] = s1
+		carry[i] = c1
 	}
-	c.end()
-	return sum, carry
+	c.end(id, out[:]...)
+	return out, carry
 }
 
 func (c *Circuit) DMux(in, sel Signal) (a, b Signal) {
-	// s||a|b || (i = (in))
-	// --------
-	// 0||i|0
-	// 1||0|i
-	// --------
-	// 0||0|0
-	// 0||1|0
-	// 1||0|0
-	// 1||0|1
-
-	// If sel == 0 -> out = (in, 0)
-	// out = in , 0
-	// if in = 0 -> 0||0|0
-	// if in = 1 -> 0||1,0 -> And(in, Not(sel))
-
-	// if sel == 1 -> out = (0, in)
-	// out = 0 , in
-	// if in = 0 -> 1||0|0
-	// if in = 1 -> 1||0|1 -> And(in, sel)
-
+	id := c.begin("DMux", []Signal{in, sel})
 	a = c.And(in, c.Not(sel))
 	b = c.And(in, sel)
+	c.end(id, a, b)
 	return a, b
 }
 
@@ -605,25 +858,25 @@ func (c *Circuit) And16(a, b [16]Signal) (o [16]Signal) {
 	ins := make([]Signal, 0, 32)
 	ins = append(ins, a[:]...)
 	ins = append(ins, b[:]...)
-	c.begin("And16", ins)
+	id := c.begin("And16", ins)
 
 	for i := range 16 {
 		o[i] = c.And(a[i], b[i])
 	}
-	c.end()
+	c.end(id, o[:]...)
 	return o
 }
 
 func (c *Circuit) Mux(a, b, sel Signal) Signal {
-	c.begin("Mux", nil)
+	id := c.begin("Mux", []Signal{a, b, sel})
 	var out Signal
 	c.quiet(func() {
 		selA := c.And(a, c.Not(sel))
 		selB := c.And(b, sel)
 		out = c.Or(selA, selB)
 	})
-	c.end()
-	return c.chip("Mux", []Signal{a, b, sel}, out)
+	c.end(id, out)
+	return out
 }
 
 func (c *Circuit) Mux16(a, b [16]Signal, sel Signal) (o [16]Signal) {
@@ -631,11 +884,11 @@ func (c *Circuit) Mux16(a, b [16]Signal, sel Signal) (o [16]Signal) {
 	ins = append(ins, a[:]...)
 	ins = append(ins, b[:]...)
 	ins = append(ins, sel)
-	c.begin("Mux16", ins)
+	id := c.begin("Mux16", ins)
 	for i := range 16 {
 		o[i] = c.Mux(a[i], b[i], sel)
 	}
-	c.end()
+	c.end(id, o[:]...)
 	return o
 }
 
@@ -647,6 +900,7 @@ func (c *Circuit) ALU(x, y [16]Signal, zx, nx, zy, ny, f, no Signal) (out [16]Si
 	ins = append(ins, zx, nx, zy, ny, f, no)
 
 	c.begin("ALU", ins)
+	aluID := c.currentTopNode()
 
 	// Zero x/y
 	zx16 := c.alloc16(zx)
@@ -670,7 +924,7 @@ func (c *Circuit) ALU(x, y [16]Signal, zx, nx, zy, ny, f, no Signal) (out [16]Si
 	no16 := c.alloc16(no)
 	out = c.Xor16(fOut, no16)
 
-	c.end()
+	c.end(aluID, out[:]...)
 	return out
 }
 
