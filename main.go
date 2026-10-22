@@ -672,7 +672,6 @@ func (c *Circuit) ALU(x, y [16]Signal, zx, nx, zy, ny, f, no Signal) (out [16]Si
 
 	c.end()
 	return out
-
 }
 
 //
