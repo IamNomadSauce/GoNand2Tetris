@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nand2tetris — circuit viewer</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">nand2tetris<span class="sub">circuit viewer</span></div>
+    <select id="circuit-select" title="choose circuit"></select>
+    <div class="spacer"></div>
+    <button id="btn-expand" title="expand all chips in view">Expand all</button>
+    <button id="btn-collapse" title="collapse all chips">Collapse all</button>
+    <button id="btn-collapse-one" title="collapse deepest open chip">Collapse one</button>
+    <button id="btn-fit" title="fit view (F)">Fit</button>
+    <button id="btn-export" title="save canvas as PNG">PNG</button>
+    <span id="status" class="status"></span>
+  </header>
+
+  <main id="main">
+    <script>
+      // capture module-load errors early (element-level errors need capture phase)
+      window.addEventListener('error', (e) => {
+        const el = document.getElementById('status');
+        if (el) el.textContent = `LOAD ERROR: ${e.message} @ ${(e.filename || '').split('/').pop()}:${e.lineno}`;
+        console.error(e.error || e.message);
+      }, true);
+    </script>
+    <aside id="sidebar">
+      <section id="panel-sim" class="panel">
+        <h2>Inputs <button id="btn-reset" class="mini" title="set all inputs to 0">reset</button></h2>
+        <div id="inputs"></div>
+      </section>
+      <section id="panel-legend" class="panel">
+        <h2>Legend</h2>
+        <div class="legend">
+          <span><i class="sw w1"></i> wire = 1</span>
+          <span><i class="sw w0"></i> wire = 0</span>
+          <span><i class="sw wm"></i> mixed bus</span>
+          <span><i class="sw wr"></i> unpowered wire</span>
+          <span><i class="sw chip"></i> chip (click = inspect)</span>
+          <span><i class="sw gate"></i> primitive gate</span>
+        </div>
+        <p class="hint">drag = pan · wheel = zoom · click = inspect<br>
+        dbl-click chip = enter · Esc = back up<br>
+        click input pill = flip bit (+shift = set 1 bit of bus)<br>
+        hover = highlight wires &amp; values</p>
+      </section>
+    </aside>
+
+    <div id="stage">
+      <canvas id="canvas"></canvas>
+      <div id="crumbs"></div>
+      <div id="tooltip"></div>
+    </div>
+
+    <aside id="inspector">
+      <div id="inspect-body"><p class="empty">no selection</p></div>
+    </aside>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
