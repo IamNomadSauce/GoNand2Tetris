@@ -48,7 +48,12 @@ export class Sim {
   busValue(base) {
     const bits = this.circuit.buses.get(base);
     if (!bits || !bits.length) return null;
-    if (!bits.every((b) => this.values.has(b))) return null;
+    return this.bitsValue(bits);
+  }
+
+  // hex of an ordered bit list (first bit = MSB)
+  bitsValue(bits) {
+    if (!bits.length || bits.some((b) => !this.values.has(b))) return null;
     let v = 0;
     for (const b of bits) v = (v << 1) | (this.values.get(b) ? 1 : 0);
     return `0x${v.toString(16).padStart(Math.ceil(bits.length / 4), '0')}`;

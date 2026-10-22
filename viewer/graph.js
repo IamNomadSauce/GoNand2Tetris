@@ -103,24 +103,61 @@ export class CircuitData {
     // ---- archetype registry -------------------------------------------------
     // A homogeneous group of same-named sibling chips (the 16 Mux bit-slices
     // inside Mux16, the 16 FullAdders rippling through Add16, ...) is presented
-    // in the view as ONE representative box with a count badge; expanding it
-    // reveals the real instances. Archetype ids are negative so they never
+    // in the view as ONE representative box with a count badge. Expanding an
+    // archetype shows its guts grouped by ROLE across all instances (virtual
+    // sub-archetypes), recursively down to "Nand ×N"; Nand-level archetypes
+    // expand to their real instances. Archetype ids are negative so they never
     // collide with real node ids (which are >= 1) or DOCK (0).
-    this.arch = new Map(); // archId -> {parentId, name, count, memberIds, inPins, outPins, ins, outs}
+    this.arch = new Map(); // archId -> {id, parentId, name, count, memberIds, gutIds, inPins, outPins, ins, outs}
     this.archOfChild = new Map(); // instance id -> archId
-    this.archOfParent = new Map(); // parent id -> archId
+    this.archOfParent = new Map(); // parent node id -> archId
     {
-      let nextId = -1;
+      const nextId = { n: -1 };
+      const makeArch = (parentId, name, memberIds, isVirtual) => {
+        const aid = nextId.n--;
+        const a = { id: aid, parentId, name, count: memberIds.length, memberIds, virtual: !!isVirtual, gutIds: [] };
+        this.arch.set(aid, a);
+        for (const k of memberIds) this.archOfChild.set(k, aid);
+        return a;
+      };
+
+      // real archetypes: homogeneous named siblings of a real container
       for (const id of this.order) { // parents are created before children
         const kids = this.children.get(id) || [];
         if (kids.length < 2) continue;
         const name = this.nodes.get(kids[0]).name;
         if (!kids.every((k) => this.nodes.get(k).name === name)) continue;
-        const aid = nextId--;
-        this.arch.set(aid, { parentId: id, name, count: kids.length, memberIds: [...kids] });
-        this.archOfParent.set(id, aid);
-        for (const k of kids) this.archOfChild.set(k, aid);
+        const a = makeArch(id, name, [...kids], false);
+        this.archOfParent.set(id, a.id);
       }
+
+      // virtual archetypes: the guts of an archetype, grouped by structural
+      // role (name + ordinal among same-named gut chips) across instances
+      const buildGuts = (a) => {
+        const groups = new Map(); // `${name}#${slot}` -> memberIds
+        for (const m of a.memberIds) {
+          const kids = this.children.get(m) || [];
+          const slotOf = new Map();
+          for (const k of kids) {
+            const nm = this.nodes.get(k).name;
+            const slot = slotOf.get(nm) ?? 0;
+            slotOf.set(nm, slot + 1);
+            const key = `${nm}#${slot}`;
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(k);
+          }
+        }
+        for (const [key, members] of groups) {
+          const [name] = key.split('#');
+          const g = makeArch(a.id, name, members, true);
+          a.gutIds.push(g.id);
+          buildGuts(g); // recurse (Nand members have no guts -> terminates)
+        }
+      };
+      for (const a of Array.from(this.arch.values())) { // snapshot: recursion appends
+        if (!a.virtual) buildGuts(a);
+      }
+
       for (const a of this.arch.values()) {
         const { inGroups, outGroups, ins, outs, nandCount } = archAnalysis(this, a);
         a.inPins = inGroups;
@@ -224,6 +261,35 @@ function busIndex(circuit, base, signal) {
 // viewNode: { node, children: viewNode[]|null, container: bool, inPins, outPins }
 // Pins (computed only for containers): [{signals, bits, label, base, isBus}]
 export function buildView(circuit, drillRootId, expanded) {
+  // view node for an archetype (real or virtual): expansion reveals its role-
+  // grouped guts when they exist, otherwise the real instances (Nand level)
+  const archVnOf = (a) => {
+    const openA = expanded.has(a.id);
+    const kids = openA
+      ? (a.gutIds.length
+        ? a.gutIds.map((gid) => archVnOf(circuit.arch.get(gid)))
+        : a.memberIds.map((mid) => walk(circuit.nodes.get(mid))))
+      : null;
+    return {
+      node: {
+        id: a.id,
+        name: a.name,
+        parent: a.parentId,
+        isNand: false,
+        arch: a,
+        nandCount: a.nandCount,
+        inputs: a.ins,
+        outputs: a.outs,
+      },
+      arch: a,
+      drillRoot: a.id === drillRootId,
+      container: openA,
+      children: kids,
+      inPins: a.inPins,
+      outPins: a.outPins,
+    };
+  };
+
   const walk = (node) => {
     const hasKids = (circuit.children.get(node.id)?.length ?? 0) > 0;
     const open = hasKids && expanded.has(node.id);
@@ -239,32 +305,16 @@ export function buildView(circuit, drillRootId, expanded) {
       const archId = circuit.archOfParent.get(node.id);
       if (archId !== undefined) {
         const a = circuit.arch.get(archId);
-        const openA = expanded.has(archId);
-        const archNode = {
-          id: archId,
-          name: a.name,
-          parent: node.id,
-          isNand: false,
-          arch: a,
-          nandCount: a.nandCount,
-          inputs: a.ins,
-          outputs: a.outs,
-        };
-        const av = {
-          node: archNode,
-          arch: a,
-          drillRoot: archId === drillRootId,
-          container: openA,
-          children: openA ? a.memberIds.map((mid) => walk(circuit.nodes.get(mid))) : null,
-          inPins: a.inPins,
-          outPins: a.outPins,
-        };
-        v.children = [av];
+        v.children = [archVnOf(a)];
+        // the container externally behaves exactly like its archetype: reuse
+        // the role-bundled ports instead of re-deriving per-bit pills
+        v.inPins = a.inPins;
+        v.outPins = a.outPins;
       } else {
         const kids = circuit.children.get(node.id) || [];
         v.children = kids.map((id) => walk(circuit.nodes.get(id)));
+        [v.inPins, v.outPins] = computePins(circuit, node.id, open);
       }
-      [v.inPins, v.outPins] = computePins(circuit, node.id, open);
     }
     return v;
   };
@@ -281,25 +331,12 @@ export function buildView(circuit, drillRootId, expanded) {
       outPins,
     };
   } else if (circuit.arch.has(drillRootId)) {
-    // full-screen view of an archetype: the arch becomes the dock frame
+    // full-screen view of an archetype: bit-space, the real instances
     const a = circuit.arch.get(drillRootId);
-    root = {
-      node: {
-        id: drillRootId,
-        name: a.name,
-        parent: a.parentId,
-        isNand: false,
-        arch: a,
-        nandCount: a.nandCount,
-        inputs: a.ins,
-        outputs: a.outs,
-      },
-      drillRoot: true,
-      container: true,
-      children: a.memberIds.map((mid) => walk(circuit.nodes.get(mid))),
-      inPins: a.inPins,
-      outPins: a.outPins,
-    };
+    root = archVnOf(a);
+    root.drillRoot = true;
+    root.container = true; // drill always shows the member instances
+    root.children = a.memberIds.map((mid) => walk(circuit.nodes.get(mid)));
   } else {
     root = walk(circuit.nodes.get(drillRootId));
   }
@@ -329,7 +366,33 @@ function pinGroupsOf(signals, circuit) {
   return groups;
 }
 
-// archetype boundary analysis: unions over member subtrees
+// one archetype port role -> one pin group; bus even when the member bits
+// carry unrelated (anonymous) signal names, labeled "<n>w" then
+function portGroup(b, circuit) {
+  const bits = [...b];
+  if (bits.length < 2) {
+    return { base: null, bits, isBus: false, label: circuit.signalName(bits[0]) };
+  }
+  let sharedBase = null;
+  let shared = true;
+  for (const s of bits) {
+    const m = /^(.*)\[\d+\]$/.exec(circuit.signalName(s));
+    const base = m ? m[1] : null;
+    if (base == null) { shared = false; break; }
+    if (sharedBase == null) sharedBase = base;
+    else if (sharedBase !== base) { shared = false; break; }
+  }
+  if (shared && sharedBase) {
+    return { base: sharedBase, bits, isBus: true, label: `${sharedBase}[${bits.length}]` };
+  }
+  return { base: null, bits, isBus: true, label: `${bits.length}w` };
+}
+
+// archetype boundary analysis: unions over member subtrees.
+// Ports are bundled by ROLE: the j-th declared input of each member instance
+// belongs to the same conceptual port (slot bundling), so bit-slices of
+// anonymous internal wires collapse into one bus pill even without shared
+// signal names. Leftover signals fall back to name-based grouping.
 function archAnalysis(circuit, a) {
   const members = new Set(); // union of instance subtrees (incl guts)
   for (const m of a.memberIds) {
@@ -339,14 +402,14 @@ function archAnalysis(circuit, a) {
   for (const m of a.memberIds) {
     for (const s of circuit.subtreeSignals.get(m)) produced.add(s);
   }
+  const isSignal = (s) => circuit.producer.has(s) || circuit.signalNames.has(s);
 
   const inSignals = new Set();
   for (const id of members) {
     const n = circuit.nodes.get(id);
     for (const s of n.inputs) {
       if (produced.has(s)) continue;
-      // un-named un-driven signals are constants (e.g. carry-in 0)
-      if (!circuit.producer.has(s) && !circuit.signalNames.has(s)) continue;
+      if (!isSignal(s)) continue; // constants (e.g. carry-in 0)
       inSignals.add(s);
     }
   }
@@ -359,12 +422,42 @@ function archAnalysis(circuit, a) {
     if (produced.has(s)) outSignals.add(s);
   }
 
+  // role bundles: slot j of each member's declared ports
+  const inBundles = []; // index j -> Set of signals
+  for (const m of a.memberIds) {
+    const n = circuit.nodes.get(m);
+    n.inputs.forEach((s, j) => {
+      if (!inSignals.has(s)) return; // produced inside / constant
+      (inBundles[j] ||= new Set()).add(s);
+    });
+  }
+  const outBundles = [];
+  for (const m of a.memberIds) {
+    const n = circuit.nodes.get(m);
+    n.outputs.forEach((s, j) => {
+      if (!outSignals.has(s)) return;
+      (outBundles[j] ||= new Set()).add(s);
+    });
+  }
+
+  const inGroups = [];
+  for (const b of inBundles) if (b?.size) inGroups.push(portGroup(b, circuit));
+  const covered = new Set(inBundles.flatMap((b) => (b ? [...b] : [])));
+  const extras = new Set([...inSignals].filter((s) => !covered.has(s)));
+  if (extras.size) inGroups.push(...pinGroupsOf(extras, circuit));
+
+  const outGroups = [];
+  for (const b of outBundles) if (b?.size) outGroups.push(portGroup(b, circuit));
+  const outCovered = new Set(outBundles.flatMap((b) => (b ? [...b] : [])));
+  const outExtras = new Set([...outSignals].filter((s) => !outCovered.has(s)));
+  if (outExtras.size) outGroups.push(...pinGroupsOf(outExtras, circuit));
+
   let nandCount = 0;
   for (const m of a.memberIds) nandCount += circuit.nodes.get(m).nandCount || 0;
 
   return {
-    inGroups: pinGroupsOf(inSignals, circuit),
-    outGroups: pinGroupsOf(outSignals, circuit),
+    inGroups,
+    outGroups,
     ins: [...inSignals].sort((x, y) => x - y),
     outs: [...outSignals].sort((x, y) => x - y),
     nandCount,
@@ -417,6 +510,18 @@ export function computeWires(circuit, view) {
   };
   collect(view);
 
+  // deepest visible archetype containing each real node pre-registers itself
+  // via its direct members; resolution climbs from the producer through real
+  // parents until a member (or a visible node) is hit
+  const virtualByMember = new Map(); // real member id -> arch id
+  const registerVirtual = (vn) => {
+    if (vn.node.arch) {
+      for (const m of vn.node.arch.memberIds) virtualByMember.set(m, vn.node.id);
+    }
+    if (vn.children) for (const c of vn.children) registerVirtual(c);
+  };
+  registerVirtual(view); // pre-order: deeper archetypes overwrite shallower
+
   // map: signal -> the outPin pseudo source when produced inside a container
   // (handled via ownerOf: emitted container itself is the wire source)
 
@@ -461,10 +566,16 @@ export function computeWires(circuit, view) {
       return { type: 'pinIn', container: containerId, s };
     }
     if (prod && members.has(prod)) {
-      // produced inside; source = nearest visible ancestor of prod
-      const own = circuit.ownerOf(prod, visibleMembers(circuit, vn));
-      if (own == null) return { type: 'pinIn', container: containerId, s };
-      return { type: 'node', id: own };
+      // produced inside; source = deepest visible view unit containing prod
+      // (a visible real node, or a visible archetype box owning it)
+      let cur = prod;
+      while (cur) {
+        if (visible.has(cur)) return { type: 'node', id: cur };
+        const g = virtualByMember.get(cur);
+        if (g !== undefined && visible.has(g)) return { type: 'node', id: g };
+        cur = circuit.nodes.get(cur)?.parent ?? 0;
+      }
+      return { type: 'pinIn', container: containerId, s };
     }
     return { type: 'pinIn', container: containerId, s };
   };
@@ -498,7 +609,7 @@ export function computeWires(circuit, view) {
         }
       }
       // inner production feeding the container's own output pins
-      const members = circuit.subtreeNodes.get(vn.node.id);
+      const members = scopeSets(vn).members;
       if (child.node.isNand) {
         for (const s of child.node.outputs) {
           const consumers = circuit.consumerOf.get(s) || [];
@@ -515,17 +626,6 @@ export function computeWires(circuit, view) {
   // group each wire's signals
   for (const w of wires.values()) w.groups = groupSignals([...w.signals], circuit);
   return wires;
-}
-
-// visible members of a container *view node* — ids emitted inside it (not all subtree)
-function visibleMembers(circuit, vn) {
-  const set = new Set();
-  const rec = (v) => {
-    set.add(v.node.id);
-    if (v.children) for (const c of v.children) rec(c);
-  };
-  rec(vn);
-  return set;
 }
 
 // drill tree path helpers

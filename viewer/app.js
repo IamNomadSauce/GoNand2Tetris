@@ -398,7 +398,8 @@ function onUp(e) {
   }
   // interactive input pins on the root scope
   if (hit.kind === 'pinIn' && isRootScopePin(hit)) {
-    if (hit.isBus) {
+    if (hit.isBus || !state.circuit.primary.has(hit.bits[0])) {
+      // multi-bit groups and internal (non-primary) signals just select
       setSelected(hit);
     } else {
       state.sim.toggle(hit.bits[0]);
@@ -419,6 +420,11 @@ function onUp(e) {
     return;
   }
   setSelected(hit);
+  // archetype boxes ladder on click: reveal the canon decomposition inline
+  if (hit.node?.arch && !state.expanded.has(+hit.id)) {
+    state.expanded.add(+hit.id);
+    rebuild();
+  }
 }
 
 function isRootScopePin(hit) {
@@ -492,26 +498,29 @@ function hexOf(bits, sim) {
 
 function expandableInDrill() {
   const out = [];
+  const seen = new Set();
   const rootId = state.drill[state.drill.length - 1];
   const stack = [rootId];
-  const pushKids = (id) => {
-    for (const c of state.circuit.children.get(id) || []) {
-      out.push(c);
-      // contents of homogeneous archetypes are behind the arch marker
-      const archId = state.circuit.archOfChild.get(c);
-      stack.push(c);
-      if (archId !== undefined) stack.push(archId);
-    }
+  const push = (id) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push(id);
+    stack.push(id);
   };
-  const rootArch = state.circuit.arch.has(rootId)
-    ? state.circuit.arch.get(rootId).memberIds
-    : null;
-  if (rootArch) stack.push(...rootArch);
   while (stack.length) {
     const id = stack.pop();
-    pushKids(id);
+    const a = state.circuit.arch.get(id);
+    if (a) {
+      // archetype: its guts if they exist, otherwise the raw bit instances
+      for (const k of (a.gutIds.length ? a.gutIds : a.memberIds)) push(k);
+      continue;
+    }
+    // real node: descend into its children, behind archetype markers too
+    const archId = state.circuit.archOfChild.get(id);
+    if (archId !== undefined) push(archId);
+    for (const c of state.circuit.children.get(id) || []) push(c);
   }
-  return out.filter((id) => !state.circuit.nodes.get(id)?.isNand);
+  return out.filter((n) => !state.circuit.nodes.get(n)?.isNand);
 }
 
 function exportPNG() {

@@ -11,10 +11,11 @@ export function renderInputs(el, circuit, sim, pins, onChange) {
       const head = document.createElement('div');
       head.className = 'bus-title';
       const lbl = document.createElement('span');
-      lbl.textContent = `${group.base}[${group.bits.length}]`;
+      lbl.textContent = group.base ? `${group.base}[${group.bits.length}]` : group.label;
       const val = document.createElement('span');
       val.className = 'bus-value';
-      val.dataset.bus = group.base;
+      val.dataset.bus = group.base || '';
+      val.dataset.bits = group.bits.join(',');
       head.append(lbl, val);
       g.append(head);
       const bits = document.createElement('div');
@@ -40,10 +41,16 @@ function bitPill(signal, circuit, sim, onChange, busBase, wide) {
   const name = document.createElement('span');
   name.textContent = circuit.signalName(signal);
   pill.append(dot, name);
-  pill.addEventListener('click', () => {
-    sim.toggle(signal);
-    onChange();
-  });
+  if (circuit.primary.has(signal)) {
+    // only true circuit inputs are toggleable; probe pills are read-only
+    pill.addEventListener('click', () => {
+      sim.toggle(signal);
+      onChange();
+    });
+  } else {
+    pill.classList.add('probe');
+    pill.title = 'internal signal (read-only)';
+  }
   return pill;
 }
 
@@ -54,16 +61,22 @@ export function refreshInputValues(el, circuit, sim) {
     pill.classList.toggle('on', v === 1);
   }
   for (const val of el.querySelectorAll('.bus-value')) {
-    const base = val.dataset.bus;
-    let v = 0;
-    let known = true;
-    for (const b of circuit.buses.get(base) || []) {
-      if (!sim.inputs.has(b)) { known = false; break; }
-      v = (v << 1) | sim.valueOf(b);
+    if (val.dataset.bus) {
+      const base = val.dataset.bus;
+      const bits = circuit.buses.get(base) || [];
+      let v = 0;
+      let known = true;
+      for (const b of bits) {
+        if (!sim.inputs.has(b)) { known = false; break; }
+        v = (v << 1) | sim.valueOf(b);
+      }
+      val.textContent = known && bits.length
+        ? `0x${v.toString(16).padStart(Math.ceil(bits.length / 4), '0')}`
+        : '';
+    } else {
+      const bits = (val.dataset.bits || '').split(',').filter(Boolean).map(Number);
+      val.textContent = bits.length ? sim.bitsValue(bits) ?? '' : '';
     }
-    val.textContent = known
-      ? `0x${v.toString(16).padStart(Math.ceil((circuit.buses.get(base).length) / 4), '0')}`
-      : '';
   }
 }
 

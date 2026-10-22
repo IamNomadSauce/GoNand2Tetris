@@ -327,8 +327,8 @@ export function createRenderer(canvas) {
     }
     ctx.fillText(label + val, it.x + it.w / 2, it.y + it.h / 2, it.w - 10);
     // bus hex readout, drawn just outside the pill
-    if (it.base && it.bits.length > 1) {
-      const hex = state.sim.busValue(it.base);
+    if (it.bits.length > 1) {
+      const hex = it.base ? state.sim.busValue(it.base) : state.sim.bitsValue(it.bits);
       if (hex) {
         ctx.font = '11px ui-monospace, monospace';
         ctx.fillStyle = vals.some((v) => v === 1) ? C.w1 : C.dim;
