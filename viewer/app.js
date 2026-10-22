@@ -81,7 +81,8 @@ async function boot() {
     setSelCircuit(+sel.value);
   }
   if (params.get('drill')) {
-    const ids = params.get('drill').split(',').map(Number).filter((id) => state.circuit.nodes.has(id));
+    const ids = params.get('drill').split(',').map(Number)
+      .filter((id) => state.circuit.nodes.has(id) || state.circuit.arch.has(id));
     if (ids.length) {
       for (const id of ids) state.expanded.add(id);
       state.drill = [0, ...ids];
@@ -90,7 +91,8 @@ async function boot() {
   }
   if (params.get('expand')) {
     for (const id of params.get('expand').split(',')) {
-      if (state.circuit.nodes.has(+id)) state.expanded.add(+id);
+      const n = +id;
+      if (state.circuit.nodes.has(n) || state.circuit.arch.has(n)) state.expanded.add(n);
     }
     rebuild(true);
   }
@@ -98,6 +100,16 @@ async function boot() {
     const sid = +params.get('select');
     if (state.circuit.nodes.has(sid)) {
       setSelected({ id: String(sid), kind: 'chip', node: state.circuit.nodes.get(sid) });
+    } else if (state.circuit.arch.has(sid)) {
+      const a = state.circuit.arch.get(sid);
+      setSelected({
+        id: String(sid),
+        kind: 'chip',
+        node: {
+          id: sid, name: a.name, arch: a, isNand: false,
+          nandCount: a.nandCount, inputs: a.ins, outputs: a.outs,
+        },
+      });
     }
   }
   if (params.get('set')) {
@@ -264,10 +276,15 @@ function wireControls() {
 
   canvas.addEventListener('dblclick', (e) => {
     const hit = hoverAt(e);
-    if (hit && (hit.kind === 'chip' || hit.kind === 'container') && state.circuit.children.get(+hit.id)?.length) {
-      state.drill.push(+hit.id);
-      state.selected = null;
-      rebuild(true);
+    if (hit && (hit.kind === 'chip' || hit.kind === 'container')) {
+      const id = +hit.id;
+      const hasKids = (state.circuit.children.get(id)?.length ?? 0) > 0
+        || state.circuit.arch.has(id);
+      if (hasKids) {
+        state.drill.push(id);
+        state.selected = null;
+        rebuild(true);
+      }
     }
   });
 
@@ -301,10 +318,20 @@ function wireControls() {
     rebuild();
   });
   $('btn-collapse-one').addEventListener('click', () => {
-    // collapse the deepest currently-expanded chip on the drill path
+    // collapse the deepest currently-expanded chip/archetype on the drill path
     for (let i = state.drill.length - 1; i >= 1; i--) {
       const p = state.drill[i];
       for (const cid of [...state.expanded]) {
+        if (cid < 0) {
+          // archetype: collapse if it sits inside this scope
+          const parent = state.circuit.arch.get(cid)?.parentId;
+          if (parent === p || (parent && state.circuit.inSubtree(parent, p))) {
+            state.expanded.delete(cid);
+            rebuild();
+            return;
+          }
+          continue;
+        }
         if (state.circuit.inSubtree(cid, p) && cid !== p) {
           state.expanded.delete(cid);
           rebuild();
@@ -467,12 +494,23 @@ function expandableInDrill() {
   const out = [];
   const rootId = state.drill[state.drill.length - 1];
   const stack = [rootId];
+  const pushKids = (id) => {
+    for (const c of state.circuit.children.get(id) || []) {
+      out.push(c);
+      // contents of homogeneous archetypes are behind the arch marker
+      const archId = state.circuit.archOfChild.get(c);
+      stack.push(c);
+      if (archId !== undefined) stack.push(archId);
+    }
+  };
+  const rootArch = state.circuit.arch.has(rootId)
+    ? state.circuit.arch.get(rootId).memberIds
+    : null;
+  if (rootArch) stack.push(...rootArch);
   while (stack.length) {
     const id = stack.pop();
-    out.push(id);
-    for (const c of state.circuit.children.get(id) || []) stack.push(c);
+    pushKids(id);
   }
-  out.pop(); // exclude root itself
   return out.filter((id) => !state.circuit.nodes.get(id)?.isNand);
 }
 

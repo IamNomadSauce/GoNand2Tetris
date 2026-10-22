@@ -144,16 +144,17 @@ export function renderInspector(el, hit, circuit, sim, actions) {
 
   // node
   const node = hit.node;
-  el.append(h3(node.isNand ? 'gate' : 'chip'));
+  el.append(h3(node.arch ? 'chip group' : node.isNand ? 'gate' : 'chip'));
   const title = document.createElement('div');
   title.style.cssText = 'font-size:16px;font-weight:700;margin-bottom:6px';
-  title.textContent = node.name;
+  title.textContent = node.arch ? `${node.arch.name} ×${node.arch.count}` : node.name;
   el.append(title);
 
+  const kids = node.arch ? node.arch.memberIds : (circuit.children.get(node.id) || []);
   el.append(kv([
     ['id', String(node.id)],
-    ['NAND gates', node.isNand ? '1' : String(node.nandCount)],
-    ['levels deep', String(node.depth)],
+    ['NAND gates', node.isNand ? '1' : String(node.arch?.nandCount ?? node.nandCount)],
+    [node.arch ? 'instances' : 'levels deep', node.arch ? String(node.arch.count) : String(node.depth)],
     ['inputs', String(node.inputs.length)],
     ['outputs', String(node.outputs.length)],
   ]));
@@ -168,12 +169,11 @@ export function renderInspector(el, hit, circuit, sim, actions) {
     el.append(sigTable(outSigs, circuit, sim));
   }
 
-  const kids = circuit.children.get(node.id) || [];
   const btnRow = document.createElement('div');
   btnRow.className = 'btn-row';
-  if (!node.isNand && kids.length) {
+  if (!node.isNand && (kids.length || node.arch)) {
     const expanded = actions.isExpanded(node.id);
-    const enter = mkBtn(kids.length && hit.kind !== 'container' ? 'Enter ' : 'Enter', () => actions.enter(node.id));
+    const enter = mkBtn('Enter', () => actions.enter(node.id));
     btnRow.append(enter);
     const ex = mkBtn(expanded ? 'Collapse' : 'Expand', () => (expanded ? actions.collapse(node.id) : actions.expand(node.id)));
     btnRow.append(ex);
@@ -188,7 +188,7 @@ export function renderInspector(el, hit, circuit, sim, actions) {
     list.className = 'member-list';
     for (const cid of kids) {
       const c = circuit.nodes.get(cid);
-      const b = mkBtn(c.name, () => actions.select(cid));
+      const b = mkBtn(node.arch ? `${c.name} #${cid}` : c.name, () => actions.select(cid));
       b.title = c.isNand ? 'NAND gate' : `${c.name} (${c.nandCount} NANDs)`;
       list.append(b);
     }
@@ -231,11 +231,20 @@ function hexOf(bits, sim) {
 }
 
 export function nodeName(circuit, ref) {
-  if (typeof ref === 'number') return circuit.nodes.get(ref)?.name ?? String(ref);
-  const m = /^pin:(\d+):(i|o):(\d+)$/.exec(String(ref));
+  if (typeof ref === 'number') {
+    if (circuit.arch && circuit.arch.has(ref)) {
+      const a = circuit.arch.get(ref);
+      return `${a.name} ×${a.count}`;
+    }
+    return circuit.nodes.get(ref)?.name ?? String(ref);
+  }
+  const m = /^pin:(-?\d+):(i|o):(\d+)$/.exec(String(ref));
   if (m) {
-    const node = circuit.nodes.get(+m[1]);
-    return `${node ? node.name : 'circuit'} ${m[2] === 'i' ? 'in' : 'out'}[${m[3]}]`;
+    const id = +m[1];
+    const container = circuit.arch?.has(id)
+      ? nodeName(circuit, id)
+      : circuit.nodes.get(id)?.name ?? 'circuit';
+    return `${container} ${m[2] === 'i' ? 'in' : 'out'}[${m[3]}]`;
   }
   return String(ref);
 }
@@ -271,7 +280,7 @@ function mkBtn(text, fn) {
 
 export function renderCrumbs(el, circuit, drill, onJump) {
   el.innerHTML = '';
-  const parts = [circuit.name, ...drill.slice(1).map((id) => circuit.nodes.get(id)?.name ?? '?')];
+  const parts = [circuit.name, ...drill.slice(1).map((id) => nodeName(circuit, id))];
   parts.forEach((p, i) => {
     const span = document.createElement('span');
     span.textContent = p;

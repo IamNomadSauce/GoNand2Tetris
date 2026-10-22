@@ -149,6 +149,10 @@ export function createRenderer(canvas) {
   }
 
   function drawChip(it, isHover, isSel) {
+    if (it.node.arch && hasGlyph(it.node.name)) {
+      drawArch(it, isHover, isSel);
+      return;
+    }
     const stroke = isSel ? C.sel : isHover ? C.hover : C.chipStroke;
     ctx.fillStyle = C.chipFill;
     ctx.strokeStyle = stroke;
@@ -159,7 +163,8 @@ export function createRenderer(canvas) {
     ctx.fillStyle = C.text;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    const name = it.node.name;
+    let name = it.node.name;
+    if (it.node.arch) name = `${name} ×${it.node.arch.count}`;
     ctx.font = '12px ui-monospace, monospace';
     const tw = ctx.measureText(name).width;
     if (tw > it.w - 14) {
@@ -174,6 +179,79 @@ export function createRenderer(canvas) {
       ctx.fillText(`${it.node.nandCount} NANDs`, it.x + it.w / 2, it.y + it.h / 2 + 12);
     }
     if (it.expandable) drawCornerBadge(it.x + it.w, it.y, '+', isHover || isSel);
+  }
+
+  // archetype representative drawn with the real gate symbol + instance count
+  function drawArch(it, isHover, isSel) {
+    const stroke = isSel ? C.sel : isHover ? C.hover : C.chipStroke;
+    ctx.fillStyle = C.chipFill;
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = isHover || isSel ? 2 : 1.4;
+    gateShapePath(it.node.name, it.x + 4, it.y + 2, it.w - 22, it.h - 4);
+    ctx.fill();
+    ctx.stroke();
+    if (bubbleFor(it.node.name)) drawBubble(it.x + it.w - 18, it.y + it.h / 2);
+    ctx.fillStyle = C.text;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillText(it.node.name, it.x + (it.w - 22) / 2, it.y + it.h / 2 - 5, it.w - 24);
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.fillStyle = C.dim;
+    ctx.fillText(`×${it.node.arch.count}`, it.x + (it.w - 22) / 2, it.y + it.h / 2 + 8, it.w - 24);
+  }
+
+  function bubbleFor(name) {
+    return name === 'Nand' || name === 'Nor' || name === 'Not' || name === 'Xnor';
+  }
+
+  function drawBubble(cx, cy) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  // IEEE-ish gate outline, inside rect (x,y,w,h); caller sets fill/stroke
+  function gateShapePath(name, x, y, w, h) {
+    ctx.beginPath();
+    if (name === 'And' || name === 'Nand') {
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w * 0.5, y);
+      ctx.arc(x + w * 0.5, y + h / 2, h / 2, -Math.PI / 2, Math.PI / 2);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+    } else if (name === 'Or' || name === 'Nor' || name === 'Xor') {
+      const k = 0.16;
+      ctx.moveTo(x, y);
+      ctx.bezierCurveTo(x + w * 0.35, y + h * k, x + w * 0.68, y + h * 0.2, x + w, y + h / 2);
+      ctx.bezierCurveTo(x + w * 0.68, y + h * (1 - k), x + w * 0.35, y + h * (1 - k * 0.42), x, y + h);
+      ctx.bezierCurveTo(x + w * 0.18, y + h * 0.72, x + w * 0.18, y + h * 0.28, x, y);
+      ctx.closePath();
+    } else if (name === 'Not') {
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y + h / 2);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+    } else if (name === 'Mux') {
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y + h * 0.2);
+      ctx.lineTo(x + w, y + h * 0.8);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+    } else if (name === 'DMux') {
+      ctx.moveTo(x, y + h * 0.2);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x + w, y + h);
+      ctx.lineTo(x, y + h * 0.8);
+      ctx.closePath();
+    } else {
+      roundRect(x, y, w, h, 5);
+    }
+  }
+
+  function hasGlyph(name) {
+    return ['Nand', 'Not', 'And', 'Or', 'Nor', 'Xor', 'Xnor', 'Mux', 'DMux'].includes(name);
   }
 
   function drawContainer(it, isHover, isSel) {
@@ -192,8 +270,9 @@ export function createRenderer(canvas) {
     ctx.fillStyle = C.titleText;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
+    const archBadge = it.node?.arch ? ` ×${it.node.arch.count}` : '';
     const nandBadge = it.node?.nandCount ? ` · ${it.node.nandCount} NANDs` : '';
-    ctx.fillText(`${it.node?.name ?? ''}${nandBadge}`, it.x + 12, it.y + 12);
+    ctx.fillText(`${it.node?.name ?? ''}${archBadge}${nandBadge}`, it.x + 12, it.y + 12);
     drawCornerBadge(it.x + it.w, it.y, '−', isHover || isSel);
   }
 
@@ -203,38 +282,26 @@ export function createRenderer(canvas) {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = isHover || isSel ? 2 : 1.2;
     const { x, y, w, h } = it;
-    const bubble = 7;
-    const bodyW = w - bubble * 2;
-    ctx.beginPath();
-    if (it.node.name === 'Nand') {
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + bodyW * 0.55, y);
-      ctx.arc(x + bodyW * 0.55, y + h / 2, h / 2, -Math.PI / 2, Math.PI / 2);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    } else if (it.node.name === 'Not') {
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + bodyW, y + h / 2);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    } else {
-      roundRect(x, y, w - bubble, h, 6);
-      ctx.fill();
-      ctx.stroke();
-    }
-    ctx.beginPath();
-    ctx.arc(x + w - bubble, y + h / 2, bubble / 2, 0, Math.PI * 2);
+    const name = it.node.name;
+    const bub = bubbleFor(name);
+    const bodyW = w - (bub ? 14 : 0);
+    gateShapePath(name, x, y, bodyW, h);
     ctx.fill();
     ctx.stroke();
+    if (name === 'Xor') {
+      // second concave back edge, characteristic of XOR
+      ctx.beginPath();
+      ctx.moveTo(x + 5, y);
+      ctx.bezierCurveTo(x + 5 + bodyW * 0.18, y + h * 0.28, x + 5 + bodyW * 0.18, y + h * 0.72, x + 5, y + h);
+      ctx.stroke();
+    }
+    if (bub) drawBubble(x + w - 4, y + h / 2);
+    if (it.expandable) drawCornerBadge(it.x + it.w, it.y, '+', isHover || isSel);
     ctx.font = '9px ui-monospace, monospace';
     ctx.fillStyle = C.dim;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(it.node.name, x + (w - bubble) / 2, y + h / 2, w - 10);
+    ctx.fillText(name, x + (bodyW + (name === 'Or' ? 8 : 0)) / 2, y + h / 2, bodyW - 8);
   }
 
   function drawPin(it, state) {

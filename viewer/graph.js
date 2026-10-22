@@ -99,6 +99,37 @@ export class CircuitData {
     };
     compute(0);
     for (const id of this.order) compute(id);
+
+    // ---- archetype registry -------------------------------------------------
+    // A homogeneous group of same-named sibling chips (the 16 Mux bit-slices
+    // inside Mux16, the 16 FullAdders rippling through Add16, ...) is presented
+    // in the view as ONE representative box with a count badge; expanding it
+    // reveals the real instances. Archetype ids are negative so they never
+    // collide with real node ids (which are >= 1) or DOCK (0).
+    this.arch = new Map(); // archId -> {parentId, name, count, memberIds, inPins, outPins, ins, outs}
+    this.archOfChild = new Map(); // instance id -> archId
+    this.archOfParent = new Map(); // parent id -> archId
+    {
+      let nextId = -1;
+      for (const id of this.order) { // parents are created before children
+        const kids = this.children.get(id) || [];
+        if (kids.length < 2) continue;
+        const name = this.nodes.get(kids[0]).name;
+        if (!kids.every((k) => this.nodes.get(k).name === name)) continue;
+        const aid = nextId--;
+        this.arch.set(aid, { parentId: id, name, count: kids.length, memberIds: [...kids] });
+        this.archOfParent.set(id, aid);
+        for (const k of kids) this.archOfChild.set(k, aid);
+      }
+      for (const a of this.arch.values()) {
+        const { inGroups, outGroups, ins, outs, nandCount } = archAnalysis(this, a);
+        a.inPins = inGroups;
+        a.outPins = outGroups;
+        a.ins = ins;
+        a.outs = outs;
+        a.nandCount = nandCount;
+      }
+    }
   }
 
   signalName(s) {
@@ -205,8 +236,34 @@ export function buildView(circuit, drillRootId, expanded) {
       outPins: null,
     };
     if (v.container) {
-      const kids = circuit.children.get(node.id) || [];
-      v.children = kids.map((id) => walk(circuit.nodes.get(id)));
+      const archId = circuit.archOfParent.get(node.id);
+      if (archId !== undefined) {
+        const a = circuit.arch.get(archId);
+        const openA = expanded.has(archId);
+        const archNode = {
+          id: archId,
+          name: a.name,
+          parent: node.id,
+          isNand: false,
+          arch: a,
+          nandCount: a.nandCount,
+          inputs: a.ins,
+          outputs: a.outs,
+        };
+        const av = {
+          node: archNode,
+          arch: a,
+          drillRoot: archId === drillRootId,
+          container: openA,
+          children: openA ? a.memberIds.map((mid) => walk(circuit.nodes.get(mid))) : null,
+          inPins: a.inPins,
+          outPins: a.outPins,
+        };
+        v.children = [av];
+      } else {
+        const kids = circuit.children.get(node.id) || [];
+        v.children = kids.map((id) => walk(circuit.nodes.get(id)));
+      }
       [v.inPins, v.outPins] = computePins(circuit, node.id, open);
     }
     return v;
@@ -222,6 +279,26 @@ export function buildView(circuit, drillRootId, expanded) {
       children: (circuit.topNodes).map((id) => walk(circuit.nodes.get(id))),
       inPins,
       outPins,
+    };
+  } else if (circuit.arch.has(drillRootId)) {
+    // full-screen view of an archetype: the arch becomes the dock frame
+    const a = circuit.arch.get(drillRootId);
+    root = {
+      node: {
+        id: drillRootId,
+        name: a.name,
+        parent: a.parentId,
+        isNand: false,
+        arch: a,
+        nandCount: a.nandCount,
+        inputs: a.ins,
+        outputs: a.outs,
+      },
+      drillRoot: true,
+      container: true,
+      children: a.memberIds.map((mid) => walk(circuit.nodes.get(mid))),
+      inPins: a.inPins,
+      outPins: a.outPins,
     };
   } else {
     root = walk(circuit.nodes.get(drillRootId));
@@ -252,10 +329,51 @@ function pinGroupsOf(signals, circuit) {
   return groups;
 }
 
+// archetype boundary analysis: unions over member subtrees
+function archAnalysis(circuit, a) {
+  const members = new Set(); // union of instance subtrees (incl guts)
+  for (const m of a.memberIds) {
+    for (const x of circuit.subtreeNodes.get(m)) members.add(x);
+  }
+  const produced = new Set(); // signals produced anywhere inside
+  for (const m of a.memberIds) {
+    for (const s of circuit.subtreeSignals.get(m)) produced.add(s);
+  }
+
+  const inSignals = new Set();
+  for (const id of members) {
+    const n = circuit.nodes.get(id);
+    for (const s of n.inputs) {
+      if (produced.has(s)) continue;
+      // un-named un-driven signals are constants (e.g. carry-in 0)
+      if (!circuit.producer.has(s) && !circuit.signalNames.has(s)) continue;
+      inSignals.add(s);
+    }
+  }
+  const outSignals = new Set();
+  for (const s of produced) {
+    const consumers = circuit.consumerOf.get(s) || [];
+    if (consumers.some((c) => !members.has(c))) outSignals.add(s);
+  }
+  for (const s of circuit.topOutputs) {
+    if (produced.has(s)) outSignals.add(s);
+  }
+
+  let nandCount = 0;
+  for (const m of a.memberIds) nandCount += circuit.nodes.get(m).nandCount || 0;
+
+  return {
+    inGroups: pinGroupsOf(inSignals, circuit),
+    outGroups: pinGroupsOf(outSignals, circuit),
+    ins: [...inSignals].sort((x, y) => x - y),
+    outs: [...outSignals].sort((x, y) => x - y),
+    nandCount,
+  };
+}
+
 function computePins(circuit, containerId, open) {
   const members = circuit.subtreeNodes.get(containerId);
   const produced = circuit.subtreeSignals.get(containerId);
-
   // input pins: consumed inside, produced outside
   const inSignals = new Set();
   for (const id of members) {
@@ -315,12 +433,29 @@ export function computeWires(circuit, view) {
   };
 
   // helper: resolve the source "node" for a signal within a container scope
+  const scopeSets = (vn) => {
+    const id = vn.node.id;
+    if (vn.arch) {
+      // archetype scope: cached unions over the instance subtrees
+      const members = new Set();
+      const produced = new Set();
+      for (const m of vn.arch.memberIds) {
+        for (const x of circuit.subtreeNodes.get(m)) members.add(x);
+        for (const s of circuit.subtreeSignals.get(m)) produced.add(s);
+      }
+      return { members, produced };
+    }
+    return {
+      members: circuit.subtreeNodes.get(id),
+      produced: circuit.subtreeSignals.get(id),
+    };
+  };
+
   const resolveForContainer = (vn, s) => {
     // returns: {type:'node', id} | {type:'pin', container, side, idx} | {type:'dock', signal}
     const prod = circuit.producerOf(s);
     const containerId = vn.node.id;
-    const members = circuit.subtreeNodes.get(containerId);
-    const produced = circuit.subtreeSignals.get(containerId);
+    const { members, produced } = scopeSets(vn);
     if (!produced.has(s)) {
       // produced outside (or primary) -> container's input pin (or dock at root)
       return { type: 'pinIn', container: containerId, s };

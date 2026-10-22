@@ -28,6 +28,8 @@ export function layout(vm, wires, circuit) {
   };
 }
 
+const GATE_NAMES = ['Nand', 'Not', 'And', 'Or', 'Nor', 'Xor', 'Mux', 'DMux'];
+
 const isContainer = (vn) => !!(vn && vn.children);
 
 // Solve the contents of container view-node vn in content-local coordinates.
@@ -35,7 +37,6 @@ const isContainer = (vn) => !!(vn && vn.children);
 function solveContent(vn, wires, circuit) {
   const containerId = vn.node.id;
   const kids = vn.children || [];
-  const graphChildren = circuit.children.get(containerId) || [];
 
   // ---- solve each member (recursively for containers) ----
   const members = kids.map((k) => {
@@ -51,12 +52,15 @@ function solveContent(vn, wires, circuit) {
         x: 0, y: 0,
       };
     }
+    // single-bit primitives render as shaped glyphs; everything else as boxes
+    const gateNamed = !k.node.arch && GATE_NAMES.includes(k.node.name);
+    const gk = k.node.isNand || gateNamed;
     return {
       vn: k,
       node: k.node,
-      kind: k.node.isNand ? 'gate' : 'chip',
-      w: k.node.isNand ? M.gateW : M.boxW,
-      h: k.node.isNand ? M.gateH : M.boxH,
+      kind: gk ? 'gate' : 'chip',
+      w: gk ? M.gateW : M.boxW,
+      h: gk ? M.gateH : M.boxH,
       inner: null,
       x: 0, y: 0,
     };
@@ -245,7 +249,9 @@ function solveContent(vn, wires, circuit) {
       y: m.y,
       w: m.w,
       h: m.h,
-      expandable: !m.node.isNand && (circuit.children.get(m.node.id)?.length ?? 0) > 0,
+      expandable: m.node.arch
+        ? true
+        : !m.node.isNand && (circuit.children.get(m.node.id)?.length ?? 0) > 0,
     });
   }
 
