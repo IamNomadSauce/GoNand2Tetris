@@ -78,10 +78,47 @@ function solveContent(vn, wires, circuit) {
   const memberIdx = new Map();
   members.forEach((m, i) => memberIdx.set(m.node.id, i));
 
+  // ---- carry-chain folds -------------------------------------------------
+  // When a homogeneous family collapses its per-slice chain (carry ripples
+  // from slice k-1 into slice k) onto one representative box per slot, the
+  // inter-slice edges fold back onto the SAME boxes and would form fake
+  // cycles. Such edges have the producing chip in a DIFFERENT member
+  // instance than the consuming chip: rank-break them and route them as
+  // feedback arcs under the row instead.
+  const instanceIdxOf = (g, chip) => {
+    for (let i = 0; i < g.memberIds.length; i++) {
+      if (circuit.subtreeNodes.get(g.memberIds[i])?.has(chip)) return i;
+    }
+    return -1;
+  };
+  const isFold = (e) => {
+    if (typeof e.src !== 'number' || typeof e.dst !== 'number') return false;
+    const sg = circuit.arch.get(e.src); // negative ids = archetype boxes
+    const dg = circuit.arch.get(e.dst);
+    if (!sg || !dg) return false;
+    for (const s of e.signals) {
+      const pc = circuit.producerOf(s);
+      if (pc == null) return false;
+      const si = instanceIdxOf(sg, pc);
+      if (si < 0) return false;
+      let saw = 0;
+      for (const c of circuit.consumerOf.get(s) || []) {
+        const di = instanceIdxOf(dg, c);
+        if (di < 0) continue; // consumed outside this wire's target gutter
+        saw++;
+        if (di !== si) return true;
+      }
+      if (saw === 0) return false;
+    }
+    return false;
+  };
+  for (const e of myEdges) e.fold = isFold(e);
+
   // ---- rank: longest path over member→member edges ----
   const preds = members.map(() => []);
   for (const e of myEdges) {
     if (typeof e.src !== 'number' || typeof e.dst !== 'number') continue;
+    if (e.fold) continue; // feedback arcs never constrain ranks
     const si = memberIdx.get(e.src);
     const di = memberIdx.get(e.dst);
     if (si !== undefined && di !== undefined) preds[di].push(si);
@@ -112,6 +149,7 @@ function solveContent(vn, wires, circuit) {
   // adjacency weights for ordering — include pin-fed wires so pins order members
   const cross = new Map(); // "a|b" -> weight
   for (const e of myEdges) {
+    if (e.fold) continue;
     const si = typeof e.src === 'number' ? memberIdx.get(e.src) : -1;
     const di = typeof e.dst === 'number' ? memberIdx.get(e.dst) : -1;
     if (si < 0 && di < 0) continue;
@@ -283,10 +321,47 @@ function solveContent(vn, wires, circuit) {
   };
 
   for (const e of myEdges) {
+    if (e.fold) {
+      // feedback arc: leave the bottom edge of the source, sweep under the
+      // rank columns along the container floor, re-enter the target's bottom
+      const fromM = posData.get(e.src);
+      const toM = posData.get(e.dst);
+      if (fromM && toM) {
+        const dipY = contentH + 22;
+        const p0 = { x: fromM.x + fromM.w - 16, y: fromM.y + fromM.h };
+        const p3 = { x: toM.x + 16, y: toM.y + toM.h };
+        e.pts = beziePath(p0, [
+          { x: p0.x, y: dipY },
+          { x: p3.x, y: dipY },
+          p3,
+        ]);
+        allEdges.push(e);
+        continue;
+      }
+    }
     const from = anchor(e, 'from');
     const to = anchor(e, 'to');
     if (!from || !to) continue;
-    e.pts = bezie(from, to);
+    // edges spanning >= 2 rank columns would pass through the intermediate
+    // column's boxes (wires draw beneath items) — arc over them instead
+    const si = memberIdx.get(e.src);
+    const di = memberIdx.get(e.dst);
+    const span = si !== undefined && di !== undefined ? rank[di] - rank[si] : 0;
+    if (span >= 2) {
+      let clearY = Math.min(from.y, to.y);
+      for (let ri = rank[si] + 1; ri < rank[di]; ri++) {
+        const col = byRank.get(ri);
+        if (col) for (const i of col) clearY = Math.min(clearY, members[i].y);
+      }
+      const peak = Math.min(from.y, to.y, clearY) - 30;
+      e.pts = beziePath(from, [
+        { x: from.x + 40, y: peak },
+        { x: to.x - 40, y: peak },
+        to,
+      ]);
+    } else {
+      e.pts = bezie(from, to);
+    }
     allEdges.push(e);
   }
 
@@ -330,14 +405,19 @@ function bezie(from, to) {
   const lead = Math.max(36, Math.min(150, Math.abs(dx) * 0.45));
   const c1 = { x: from.x + lead, y: from.y };
   const c2 = { x: to.x - lead, y: to.y };
+  return beziePath(from, [c1, c2, to]);
+}
+
+// cubic bezier through explicit control points, sampled as a polyline
+function beziePath(p0, [p1, p2, p3]) {
   const pts = [];
-  const steps = 16;
+  const steps = 18;
   for (let t = 0; t <= steps; t++) {
     const u = t / steps;
     const v = 1 - u;
     pts.push([
-      v * v * v * from.x + 3 * v * v * u * c1.x + 3 * v * u * u * c2.x + u * u * u * to.x,
-      v * v * v * from.y + 3 * v * v * u * c1.y + 3 * v * u * u * c2.y + u * u * u * to.y,
+      v * v * v * p0.x + 3 * v * v * u * p1.x + 3 * v * u * u * p2.x + u * u * u * p3.x,
+      v * v * v * p0.y + 3 * v * v * u * p1.y + 3 * v * u * u * p2.y + u * u * u * p3.y,
     ]);
   }
   return pts;

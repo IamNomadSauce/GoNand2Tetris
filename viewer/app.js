@@ -121,6 +121,14 @@ async function boot() {
     renderInspectorPanel();
     state.dirty = true;
   }
+  if (params.get('zoom')) {
+    // force scale around center after the last rebuild (fit otherwise)
+    const z = clamp(+params.get('zoom') || 1, 0.1, 3.5);
+    const { view, layout: lay } = state;
+    view.k = z;
+    view.x = (canvas.clientWidth - lay.width * z) / 2 + lay.offsetX * z;
+    view.y = (canvas.clientHeight - lay.height * z) / 2 + lay.offsetY * z;
+  }
 
   wireControls();
   paint(); // synchronous first paint (screenshots/OS snapshot before first RAF)
