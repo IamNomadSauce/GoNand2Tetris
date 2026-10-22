@@ -179,8 +179,7 @@ func (c *Circuit) Nand(a, b Signal) Signal { return c.nand(a, b) }
 
 func (c *Circuit) Not(a Signal) Signal {
 	id := c.begin("Not", []Signal{a})
-	var out Signal
-	c.quiet(func() { out = c.Nand(a, a) })
+	out := c.Nand(a, a) // primitive: expand Not to see its Nand
 	c.end(id, out)
 	return out
 }
@@ -195,26 +194,23 @@ func (c *Circuit) Not16(a [16]Signal) (o [16]Signal) {
 }
 func (c *Circuit) And(a, b Signal) Signal {
 	id := c.begin("And", []Signal{a, b})
-	var out Signal
-	c.quiet(func() { out = c.Not(c.Nand(a, b)) })
+	out := c.Not(c.Nand(a, b)) // guts: Nand + Not
 	c.end(id, out)
 	return out
 }
 
 func (c *Circuit) Or(a, b Signal) Signal {
 	id := c.begin("Or", []Signal{a, b})
-	var out Signal
-	c.quiet(func() { out = c.Nand(c.Not(a), c.Not(b)) })
+	out := c.Nand(c.Not(a), c.Not(b)) // guts: Not + Not + Nand
 	c.end(id, out)
 	return out
 }
 
 func (c *Circuit) Xor(a, b Signal) Signal {
 	id := c.begin("Xor", []Signal{a, b})
-	var out Signal
-	c.quiet(func() {
-		out = c.Or(c.And(a, c.Not(b)), c.And(b, c.Not(a)))
-	})
+	nb := c.Not(b)
+	na := c.Not(a)
+	out := c.Or(c.And(a, nb), c.And(b, na)) // guts: two Ands + two Nots + Or
 	c.end(id, out)
 	return out
 }
@@ -869,12 +865,10 @@ func (c *Circuit) And16(a, b [16]Signal) (o [16]Signal) {
 
 func (c *Circuit) Mux(a, b, sel Signal) Signal {
 	id := c.begin("Mux", []Signal{a, b, sel})
-	var out Signal
-	c.quiet(func() {
-		selA := c.And(a, c.Not(sel))
-		selB := c.And(b, sel)
-		out = c.Or(selA, selB)
-	})
+	nsel := c.Not(sel) // guts: Not + two Ands + Or
+	selA := c.And(a, nsel)
+	selB := c.And(b, sel)
+	out := c.Or(selA, selB)
 	c.end(id, out)
 	return out
 }
