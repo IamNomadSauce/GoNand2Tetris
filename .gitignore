@@ -1,1 +1,5 @@
 nand2tetris
+*.png
+*.dot
+.DS_Store
+**/.DS_Store
