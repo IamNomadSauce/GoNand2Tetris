@@ -5,13 +5,13 @@ const M = {
   boxW: 128, boxH: 48,
   gateW: 66, gateH: 38,
   rankGap: 110,      // horizontal gap between columns
-  rowGap: 14,        // vertical gap between rows
-  pad: 26,           // container inner padding
+  rowGap: 18,        // vertical gap between rows
+  pad: 34,           // container inner padding
   titleH: 30,        // container title strip
   pinH: 22,          // pin pill height
   pinW: 92,          // pin pill width (label drawn inside)
-  pinGapX: 10,       // gap between pin band and first column
-  pinGapY: 12,       // vertical gap between pin pills
+  pinGapX: 18,       // gap between pin band and first column
+  pinGapY: 14,       // vertical gap between pin pills
   margin: 110,       // world margin around the root container
 };
 
@@ -156,6 +156,27 @@ function solveContent(vn, wires, circuit) {
   const ranks = [...byRank.keys()].sort((a, b) => a - b);
   for (const r of ranks) byRank.set(r, byRank.get(r).slice().sort((a, b) => a - b));
 
+  // ---- vertical cascade: a lone member whose only member-pred sits in the
+  // preceding rank joins that member's column (stacked below) instead of
+  // widening the scope — keeps few-member chains (FullAdder's half adders)
+  // balanced instead of a long flat strip
+  if (ranks.length >= 3) {
+    for (const r of ranks) {
+      const col = byRank.get(r);
+      if (col.length !== 1) continue;
+      const predIds = [...new Set(preds[col[0]])];
+      if (predIds.length !== 1) continue;
+      const p = predIds[0];
+      if (rank[p] !== r - 1) continue;
+      byRank.delete(r);
+      byRank.get(r - 1).push(col[0]);
+      rank[col[0]] = r - 1;
+      break; // one cascade per scope keeps the rest of the flow intact
+    }
+    ranks.length = 0;
+    ranks.push(...[...byRank.keys()].sort((a, b) => a - b));
+  }
+
   // adjacency weights for ordering — include pin-fed wires so pins order members
   const cross = new Map(); // "a|b" -> weight
   for (const e of myEdges) {
@@ -255,13 +276,13 @@ function solveContent(vn, wires, circuit) {
     for (let k = 0; k < pins.length; k++) {
       let sy = 0, n = 0;
       for (const e of myEdges) {
-        let hit = false;
-        if (side === 'i' && e.src === `pin:${containerId}:i:${k}` && typeof e.dst === 'number') hit = true;
-        if (side === 'o' && e.dst === `pin:${containerId}:o:${k}` && typeof e.src === 'number') hit = true;
-        if (hit) {
-          const mi = memberIdx.get(side === 'i' ? e.dst : e.src);
-          if (mi !== undefined) { sy += members[mi].y + members[mi].h / 2; n++; }
-        }
+        const own = side === 'i' ? e.src : e.dst;
+        if (own !== `pin:${containerId}:${side}:${k}`) continue;
+        // the far end may be a member id (collapsed) or a member pill
+        // pseudo (`pin:<member>:i|o:<idx>`, expanded) — memberRef resolves both
+        const other = side === 'i' ? e.dst : e.src;
+        const mi = memberIdx.get(memberRef(other));
+        if (mi !== undefined) { sy += members[mi].y + members[mi].h / 2; n++; }
       }
       targets.push(n ? sy / n : ((k + 0.5) / pins.length) * contentH);
     }
@@ -370,6 +391,56 @@ function solveContent(vn, wires, circuit) {
     const from = anchor(e, 'from');
     const to = anchor(e, 'to');
     if (!from || !to) continue;
+    // same-rank members (vertical cascade): swing out past the source
+    // frame, drop past the target, and re-enter its input pill from below
+    if (!e.fold) {
+      const svM = memberRef(e.src);
+      const dvM = memberRef(e.dst);
+      if (svM != null && dvM != null && svM !== dvM) {
+        const siM = memberIdx.get(svM);
+        const diM = memberIdx.get(dvM);
+        if (siM !== undefined && diM !== undefined && siM !== diM && rank[siM] === rank[diM]) {
+          const srcM = posData.get(svM);
+          const toM = posData.get(dvM);
+          if (srcM && toM) {
+            // leave via the source out-pill's right face when docked there
+            const exitsPill = typeof e.src === 'string' && /:o:\d+$/.test(e.src);
+            const p0 = exitsPill ? { x: from.x + M.pinW, y: from.y } : from;
+            const swingX = srcM.x + srcM.w + 20;
+            const dipY = toM.y + toM.h + 14;
+            const corner = { x: to.x - 26, y: dipY };
+            // waypoints must be exact endpoints of each cubic (a single
+            // cubic through a control point only bulges ~60% there, which
+            // lets the swing fall back inside the frames)
+            const top = { x: swingX, y: p0.y };
+            e.pts = [
+              ...beziePath(p0, [
+                { x: p0.x + 24, y: p0.y },
+                { x: swingX - 24, y: p0.y },
+                top,
+              ]),
+              ...beziePath(top, [
+                { x: swingX, y: p0.y + (dipY - p0.y) * 0.33 },
+                { x: swingX, y: dipY - (dipY - p0.y) * 0.33 },
+                { x: swingX, y: dipY },
+              ]).slice(1),
+              ...beziePath({ x: swingX, y: dipY }, [
+                { x: swingX - 30, y: dipY },
+                { x: corner.x + 26, y: dipY },
+                corner,
+              ]).slice(1),
+              ...beziePath(corner, [
+                { x: corner.x - 10, y: dipY },
+                { x: to.x - 8, y: to.y + 12 },
+                to,
+              ]).slice(1),
+            ];
+            allEdges.push(e);
+            continue;
+          }
+        }
+      }
+    }
     // edges spanning >= 2 rank columns would pass through the intermediate
     // column's boxes (wires draw beneath items) — arc over them instead
     const sv = memberRef(e.src);
