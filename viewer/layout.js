@@ -114,13 +114,23 @@ function solveContent(vn, wires, circuit) {
   };
   for (const e of myEdges) e.fold = isFold(e);
 
+  // ref of an edge endpoint: a member chip id, or the container that owns a
+  // pin pseudo (`pin:<container>:i|o:<idx>`) — a scope's own pills resolve to
+  // itself (not a member), child-scope pills resolve to that child member.
+  const memberRef = (v) => {
+    if (typeof v === 'number') return v;
+    const m = /^pin:(\d+):(?:i|o):\d+$/.exec(String(v));
+    return m ? +m[1] : null;
+  };
+
   // ---- rank: longest path over member→member edges ----
   const preds = members.map(() => []);
   for (const e of myEdges) {
-    if (typeof e.src !== 'number' || typeof e.dst !== 'number') continue;
     if (e.fold) continue; // feedback arcs never constrain ranks
-    const si = memberIdx.get(e.src);
-    const di = memberIdx.get(e.dst);
+    const sv = memberRef(e.src);
+    const dv = memberRef(e.dst);
+    const si = sv != null ? memberIdx.get(sv) : undefined;
+    const di = dv != null ? memberIdx.get(dv) : undefined;
     if (si !== undefined && di !== undefined) preds[di].push(si);
   }
   const rank = new Array(members.length).fill(-1);
@@ -150,14 +160,16 @@ function solveContent(vn, wires, circuit) {
   const cross = new Map(); // "a|b" -> weight
   for (const e of myEdges) {
     if (e.fold) continue;
-    const si = typeof e.src === 'number' ? memberIdx.get(e.src) : -1;
-    const di = typeof e.dst === 'number' ? memberIdx.get(e.dst) : -1;
-    if (si < 0 && di < 0) continue;
-    const k = `${si}|${di}`;
+    const sv = memberRef(e.src);
+    const dv = memberRef(e.dst);
+    const si = sv != null ? memberIdx.get(sv) : undefined;
+    const di = dv != null ? memberIdx.get(dv) : undefined;
+    if (si === undefined && di === undefined) continue;
+    const k = `${si ?? -1}|${di ?? -1}`;
     cross.set(k, (cross.get(k) || 0) + 1);
   }
-  // pseudo adjacency: pin-in sources sit at rank -1
-  const pinAdj = new Map(); // memberIdx -> total pin weight
+  // pseudo adjacency: pill-fed members gravitate toward the pill band
+  const pinAdj = new Map(); // memberIdx -> total pill weight
   for (const e of myEdges) {
     if (typeof e.src === 'string' && e.src.startsWith(`pin:${containerId}:i:`) && typeof e.dst === 'number') {
       const di = memberIdx.get(e.dst);
@@ -293,13 +305,28 @@ function solveContent(vn, wires, circuit) {
     });
   }
 
-  const pinAnchor = (v, end) => {
+  const pinAnchor = (v) => {
     const match = /^pin:(\d+):(i|o):(\d+)$/.exec(String(v));
-    if (!match || +match[1] !== containerId) return null;
-    const list = match[2] === 'i' ? inPins : outPins;
+    if (!match) return null;
+    const ref = +match[1];
+    if (ref === containerId) {
+      const list = match[2] === 'i' ? inPins : outPins;
+      const p = list[+match[3]];
+      if (!p) return null;
+      return { x: p.x + (match[2] === 'i' ? p.w : 0), y: p.y + p.h / 2 };
+    }
+    // pill of a child scope: anchor at that member container's inner pill
+    const mi = memberIdx.get(ref);
+    if (mi === undefined) return null;
+    const mm = members[mi];
+    if (mm.kind !== 'container' || !mm.inner) return null;
+    const list = match[2] === 'i' ? mm.inner.inPins : mm.inner.outPins;
     const p = list[+match[3]];
     if (!p) return null;
-    return { x: p.x + (match[2] === 'i' ? p.w : 0), y: p.y + p.h / 2 };
+    return {
+      x: mm.x + M.pad + p.x + (match[2] === 'i' ? p.w : 0),
+      y: mm.y + M.titleH + M.pad + p.y + p.h / 2,
+    };
   };
 
   const anchor = (e, side) => {
@@ -344,8 +371,10 @@ function solveContent(vn, wires, circuit) {
     if (!from || !to) continue;
     // edges spanning >= 2 rank columns would pass through the intermediate
     // column's boxes (wires draw beneath items) — arc over them instead
-    const si = memberIdx.get(e.src);
-    const di = memberIdx.get(e.dst);
+    const sv = memberRef(e.src);
+    const dv = memberRef(e.dst);
+    const si = sv != null ? memberIdx.get(sv) : undefined;
+    const di = dv != null ? memberIdx.get(dv) : undefined;
     const span = si !== undefined && di !== undefined ? rank[di] - rank[si] : 0;
     if (span >= 2) {
       let clearY = Math.min(from.y, to.y);

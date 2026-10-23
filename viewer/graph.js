@@ -501,30 +501,6 @@ function computePins(circuit, containerId, open) {
 // src: node id | "dock:<signal>" | "pin:<containerId>:i:<index>"|"...:o:..."
 // Emits wires for every visible consumer node + container-boundary edges.
 export function computeWires(circuit, view) {
-  const visible = new Set(); // emitted node ids
-  const membersOf = new Map(); // container node id -> subtree member ids
-  const collect = (vn) => {
-    visible.add(vn.node.id);
-    membersOf.set(vn.node.id, circuit.subtreeNodes.get(vn.node.id) || new Set([vn.node.id]));
-    if (vn.children) for (const c of vn.children) collect(c);
-  };
-  collect(view);
-
-  // deepest visible archetype containing each real node pre-registers itself
-  // via its direct members; resolution climbs from the producer through real
-  // parents until a member (or a visible node) is hit
-  const virtualByMember = new Map(); // real member id -> arch id
-  const registerVirtual = (vn) => {
-    if (vn.node.arch) {
-      for (const m of vn.node.arch.memberIds) virtualByMember.set(m, vn.node.id);
-    }
-    if (vn.children) for (const c of vn.children) registerVirtual(c);
-  };
-  registerVirtual(view); // pre-order: deeper archetypes overwrite shallower
-
-  // map: signal -> the outPin pseudo source when produced inside a container
-  // (handled via ownerOf: emitted container itself is the wire source)
-
   const wires = new Map();
   const addWire = (src, dst, s, vnId) => {
     if (src === dst) return;
@@ -556,28 +532,24 @@ export function computeWires(circuit, view) {
     };
   };
 
-  const resolveForContainer = (vn, s) => {
-    // returns: {type:'node', id} | {type:'pin', container, side, idx} | {type:'dock', signal}
-    const prod = circuit.producerOf(s);
+  const resolveForContainer = (vn, s, owners) => {
+    // returns: {type:'node', id} | {type:'childPin', vn} | {type:'pinIn', container, s}
     const containerId = vn.node.id;
-    const { members, produced } = scopeSets(vn);
+    const { produced } = scopeSets(vn);
     if (!produced.has(s)) {
       // produced outside (or primary) -> container's input pin (or dock at root)
       return { type: 'pinIn', container: containerId, s };
     }
-    if (prod && members.has(prod)) {
-      // produced inside; source = deepest visible view unit containing prod
-      // (a visible real node, or a visible archetype box owning it)
-      let cur = prod;
-      while (cur) {
-        if (visible.has(cur)) return { type: 'node', id: cur };
-        const g = virtualByMember.get(cur);
-        if (g !== undefined && visible.has(g)) return { type: 'node', id: g };
-        cur = circuit.nodes.get(cur)?.parent ?? 0;
-      }
-      return { type: 'pinIn', container: containerId, s };
-    }
-    return { type: 'pinIn', container: containerId, s };
+    // produced inside: anchor at the scope-child owning the producer chip —
+    // the outermost visible boundary the signal can leave through. A
+    // collapsed owner contributes its chip box; an EXPANDED owner its out-pin
+    // pill. Never descend into expanded containers: wires are anchored per
+    // scope, and deep anchors would be invisible to the current container.
+    const oi = owners.get(circuit.producerOf(s));
+    if (oi === undefined) return { type: 'pinIn', container: containerId, s };
+    const kid = vn.children[oi];
+    if (kid.children) return { type: 'childPin', vn: kid };
+    return { type: 'node', id: kid.node.id };
   };
 
   const assignOutPinIdx = new Map(); // `${containerId}:o:${signal}` -> pin index
@@ -597,26 +569,52 @@ export function computeWires(circuit, view) {
   // walk all containers emitting wires for their visible members
   const walk = (vn) => {
     if (!vn.children) return;
+    // ownership: which real chip belongs to which direct child scope.
+    // Scope-level wires may only anchor at direct children (or the scope's
+    // own pin pills) — deeper endpoints would be unanchored in this solve.
+    const owners = new Map(); // chip id -> kid index
+    vn.children.forEach((kid, i) => {
+      const mids = kid.node.arch ? kid.node.arch.memberIds : [kid.node.id];
+      for (const m of mids) {
+        for (const x of circuit.subtreeNodes.get(m)) owners.set(x, i);
+      }
+    });
+    const { members } = scopeSets(vn);
+
     for (const child of vn.children) {
+      // destination: the child's box, or — when the child is expanded — its
+      // frame's input pill (the inner legs to its guts are emitted by
+      // walk(child) using the same pill index)
+      const kidDst = (s) => child.children
+        ? `pin:${child.node.id}:i:${pinIndexOf(child, 'i', s)}`
+        : child.node.id;
       for (const s of child.node.inputs) {
         // constants (unnamed un-driven signals) never get wires
         if (!circuit.producer.has(s) && !circuit.signalNames.has(s)) continue;
-        const src = resolveForContainer(vn, s);
+        const src = resolveForContainer(vn, s, owners);
         if (src.type === 'node') {
-          addWire(src.id, child.node.id, s, vn.node.id);
+          addWire(src.id, kidDst(s), s, vn.node.id);
+        } else if (src.type === 'childPin') {
+          addWire(
+            `pin:${src.vn.node.id}:o:${pinIndexOf(src.vn, 'o', s)}`,
+            kidDst(s), s, vn.node.id,
+          );
         } else if (src.type === 'pinIn') {
-          addWire(`pin:${vn.node.id}:i:${pinIndexOf(vn, 'i', s)}`, child.node.id, s, vn.node.id);
+          addWire(`pin:${vn.node.id}:i:${pinIndexOf(vn, 'i', s)}`, kidDst(s), s, vn.node.id);
         }
       }
-      // inner production feeding the container's own output pins
-      const members = scopeSets(vn).members;
-      if (child.node.isNand) {
-        for (const s of child.node.outputs) {
-          const consumers = circuit.consumerOf.get(s) || [];
-          if (consumers.some((c) => !members.has(c))) {
-            addWire(child.node.id, `pin:${vn.node.id}:o:${pinIndexOf(vn, 'o', s)}`, s, vn.node.id);
-          }
-        }
+      // stub this container's output pills for signals leaving the scope
+      // (any child: collapsed emit from the box, expanded ones emerge at
+      // their own out-pill; top-level circuit outputs have no consumer)
+      for (const s of child.node.outputs) {
+        const consumers = circuit.consumerOf.get(s) || [];
+        const exits = consumers.some((c) => !members.has(c))
+          || (!consumers.length && circuit.topOutputs.includes(s));
+        if (!exits) continue;
+        const src = child.children
+          ? `pin:${child.node.id}:o:${pinIndexOf(child, 'o', s)}`
+          : child.node.id;
+        addWire(src, `pin:${vn.node.id}:o:${pinIndexOf(vn, 'o', s)}`, s, vn.node.id);
       }
       walk(child);
     }
