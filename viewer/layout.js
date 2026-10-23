@@ -119,7 +119,7 @@ function solveContent(vn, wires, circuit) {
   // itself (not a member), child-scope pills resolve to that child member.
   const memberRef = (v) => {
     if (typeof v === 'number') return v;
-    const m = /^pin:(\d+):(?:i|o):\d+$/.exec(String(v));
+    const m = /^pin:(-?\d+):(?:i|o):\d+$/.exec(String(v));
     return m ? +m[1] : null;
   };
 
@@ -306,7 +306,8 @@ function solveContent(vn, wires, circuit) {
   }
 
   const pinAnchor = (v) => {
-    const match = /^pin:(\d+):(i|o):(\d+)$/.exec(String(v));
+    // negative refs are archetype ("gutter") children
+    const match = /^pin:(-?\d+):(i|o):(\d+)$/.exec(String(v));
     if (!match) return null;
     const ref = +match[1];
     if (ref === containerId) {
