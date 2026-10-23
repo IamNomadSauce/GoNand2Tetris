@@ -168,6 +168,10 @@ function solveContent(vn, wires, circuit) {
       if (predIds.length !== 1) continue;
       const p = predIds[0];
       if (rank[p] !== r - 1) continue;
+      // only stack a lone joiner under a frame member — stacking under a bare
+      // chip/gate flattens short chains (Mux guts: Not→And) into one tall
+      // column and turns their feed wires into staircases
+      if (members[p].kind !== 'container') continue;
       byRank.delete(r);
       byRank.get(r - 1).push(col[0]);
       rank[col[0]] = r - 1;
@@ -286,12 +290,27 @@ function solveContent(vn, wires, circuit) {
       }
       targets.push(n ? sy / n : ((k + 0.5) / pins.length) * contentH);
     }
+    const cap = contentH - M.pinH / 2 - 4;
+    const pitch = M.pinH + M.pinGapY;
     const order = targets.map((t, i) => [t, i]).sort((a, b) => a[0] - b[0]);
     const ys = new Array(pins.length).fill(0);
-    let cursor = M.pinH / 2 + 4;
-    for (const [, idx] of order) {
-      ys[idx] = Math.max(cursor, Math.min(targets[idx], contentH - M.pinH / 2 - 4));
-      cursor = ys[idx] + M.pinH + M.pinGapY;
+    const tSpread = Math.max(...targets) - Math.min(...targets);
+    if (tSpread <= 1) {
+      // all pins share one target (a collapsed root chip): centre the whole
+      // stack on it instead of trailing it below — keeps many-pin roots
+      // (ALU's eight controls) balanced instead of spilling past contentH
+      const meanT = targets.reduce((a, t) => a + t, 0) / pins.length;
+      const seed = Math.max(
+        M.pinH / 2 + 4,
+        Math.min(meanT - ((pins.length - 1) * pitch) / 2, cap - (pins.length - 1) * pitch),
+      );
+      for (let k = 0; k < pins.length; k++) ys[k] = seed + k * pitch;
+    } else {
+      let cursor = M.pinH / 2 + 4;
+      for (const [, idx] of order) {
+        ys[idx] = Math.max(cursor, Math.min(targets[idx], cap));
+        cursor = ys[idx] + pitch;
+      }
     }
     return ys;
   };
@@ -369,6 +388,29 @@ function solveContent(vn, wires, circuit) {
     return pinAnchor(v, side);
   };
 
+  // group pill→member arrivals so multi-wire feeds (ALU's control pills,
+  // bus inputs) fan into staggered chutes instead of knotting at one point
+  const fanSlots = new Map(); // edge -> slot index within its target group
+  const fanN = new Map(); // dst member id -> arrivals in the group
+  {
+    const groups = new Map();
+    for (const e of myEdges) {
+      if (e.fold) continue;
+      if (typeof e.src !== 'string' || typeof e.dst !== 'number') continue;
+      if (!e.src.startsWith(`pin:${containerId}:i:`)) continue;
+      const di = memberIdx.get(e.dst);
+      if (di === undefined || rank[di] >= 2) continue;
+      if (!groups.has(e.dst)) groups.set(e.dst, []);
+      groups.get(e.dst).push(e);
+    }
+    for (const [dst, es] of groups) {
+      if (es.length < 2) continue;
+      es.sort((a, b) => anchor(a, 'from').y - anchor(b, 'from').y);
+      fanN.set(dst, es.length);
+      es.forEach((e, j) => fanSlots.set(e, j));
+    }
+  }
+
   for (const e of myEdges) {
     if (e.fold) {
       // feedback arc: leave the bottom edge of the source, sweep under the
@@ -407,31 +449,34 @@ function solveContent(vn, wires, circuit) {
             const exitsPill = typeof e.src === 'string' && /:o:\d+$/.test(e.src);
             const p0 = exitsPill ? { x: from.x + M.pinW, y: from.y } : from;
             const swingX = srcM.x + srcM.w + 20;
-            const dipY = toM.y + toM.h + 14;
-            const corner = { x: to.x - 26, y: dipY };
+            // run under the target when it sits beside/below the source; run
+            // over it (mirrored sweep) when it is stacked above
+            const rise = toM.y + toM.h <= p0.y;
+            const landY = rise ? toM.y - 14 : toM.y + toM.h + 14;
+            const corner = { x: to.x - 26, y: landY };
             // waypoints must be exact endpoints of each cubic (a single
             // cubic through a control point only bulges ~60% there, which
             // lets the swing fall back inside the frames)
-            const top = { x: swingX, y: p0.y };
+            const swingPt = { x: swingX, y: p0.y };
             e.pts = [
               ...beziePath(p0, [
                 { x: p0.x + 24, y: p0.y },
                 { x: swingX - 24, y: p0.y },
-                top,
+                swingPt,
               ]),
-              ...beziePath(top, [
-                { x: swingX, y: p0.y + (dipY - p0.y) * 0.33 },
-                { x: swingX, y: dipY - (dipY - p0.y) * 0.33 },
-                { x: swingX, y: dipY },
+              ...beziePath(swingPt, [
+                { x: swingX, y: p0.y + (landY - p0.y) * 0.33 },
+                { x: swingX, y: landY - (landY - p0.y) * 0.33 },
+                { x: swingX, y: landY },
               ]).slice(1),
-              ...beziePath({ x: swingX, y: dipY }, [
-                { x: swingX - 30, y: dipY },
-                { x: corner.x + 26, y: dipY },
+              ...beziePath({ x: swingX, y: landY }, [
+                { x: swingX - 30, y: landY },
+                { x: corner.x + 26, y: landY },
                 corner,
               ]).slice(1),
               ...beziePath(corner, [
-                { x: corner.x - 10, y: dipY },
-                { x: to.x - 8, y: to.y + 12 },
+                { x: corner.x - 10, y: landY },
+                { x: to.x - 8, y: rise ? to.y - 12 : to.y + 12 },
                 to,
               ]).slice(1),
             ];
@@ -440,6 +485,22 @@ function solveContent(vn, wires, circuit) {
           }
         }
       }
+    }
+    // grouped pill arrivals into one member face: fan into staggered
+    // chutes with spread landings instead of overlapping at the centre
+    const fn = typeof e.dst === 'number' ? fanN.get(e.dst) : undefined;
+    const fj = fn > 1 ? fanSlots.get(e) : undefined;
+    if (fj !== undefined) {
+      const m = members[memberIdx.get(e.dst)];
+      const ay = m.y + (m.h * (fj + 1)) / (fn + 1);
+      const chX = from.x + ((to.x - from.x) * (fj + 1)) / (fn + 1);
+      e.pts = beziePath(from, [
+        { x: chX, y: from.y },
+        { x: chX, y: ay },
+        { x: to.x, y: ay },
+      ]);
+      allEdges.push(e);
+      continue;
     }
     // edges spanning >= 2 rank columns would pass through the intermediate
     // column's boxes (wires draw beneath items) — arc over them instead
@@ -454,7 +515,9 @@ function solveContent(vn, wires, circuit) {
         const col = byRank.get(ri);
         if (col) for (const i of col) clearY = Math.min(clearY, members[i].y);
       }
-      const peak = Math.min(from.y, to.y, clearY) - 30;
+      // a negative peak would thread the title strip and read as a stray
+      // wire — keep the over-arc inside the frame
+      const peak = Math.max(8, Math.min(from.y, to.y, clearY) - 30);
       e.pts = beziePath(from, [
         { x: from.x + 40, y: peak },
         { x: to.x - 40, y: peak },
