@@ -187,18 +187,33 @@ export function createRenderer(canvas) {
     ctx.fillStyle = C.chipFill;
     ctx.strokeStyle = stroke;
     ctx.lineWidth = isHover || isSel ? 2 : 1.4;
-    gateShapePath(it.node.name, it.x + 4, it.y + 2, it.w - 22, it.h - 4);
+    const bub = bubbleFor(it.node.name);
+    // bubbled gates keep a bubble lane; every other bus glyph fills its
+    // body and meets the wires at the member's right face
+    const sx = it.x + 4;
+    const sy = it.y + 2;
+    const sw = bub ? it.w - 22 : it.w - 4;
+    const sh = it.h - 4;
+    gateShapePath(it.node.name, sx, sy, sw, sh);
     ctx.fill();
     ctx.stroke();
-    if (bubbleFor(it.node.name)) drawBubble(it.x + it.w - 18, it.y + it.h / 2);
+    if (it.node.name === 'Xor' || it.node.name === 'Xnor') {
+      // second concave back edge, characteristic of XOR
+      ctx.beginPath();
+      ctx.moveTo(sx + 5, sy);
+      ctx.bezierCurveTo(sx + 5 + sw * 0.18, sy + sh * 0.28, sx + 5 + sw * 0.18, sy + sh * 0.72, sx + 5, sy + sh);
+      ctx.stroke();
+    }
+    if (bub) drawBubble(it.x + it.w - 18, it.y + it.h / 2);
     ctx.fillStyle = C.text;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = '11px ui-monospace, monospace';
-    ctx.fillText(it.node.name, it.x + (it.w - 22) / 2, it.y + it.h / 2 - 5, it.w - 24);
+    ctx.fillText(it.node.name, sx + sw / 2, it.y + it.h / 2 - 5, sw - 10);
     ctx.font = '9px ui-monospace, monospace';
     ctx.fillStyle = C.dim;
-    ctx.fillText(`×${it.node.arch.count}`, it.x + (it.w - 22) / 2, it.y + it.h / 2 + 8, it.w - 24);
+    ctx.fillText(`×${it.node.arch.count}`, sx + sw / 2, it.y + it.h / 2 + 8, sw - 10);
+    if (it.expandable) drawCornerBadge(it.x + it.w, it.y, '+', isHover || isSel);
   }
 
   function bubbleFor(name) {
@@ -216,12 +231,15 @@ export function createRenderer(canvas) {
   function gateShapePath(name, x, y, w, h) {
     ctx.beginPath();
     if (name === 'And' || name === 'Nand') {
+      // flat back, semicircular front reaching the full width (the arc
+      // centre sits at w - r so the D always ends at x + w)
+      const r = Math.min(h / 2, w / 2);
       ctx.moveTo(x, y);
-      ctx.lineTo(x + w * 0.5, y);
-      ctx.arc(x + w * 0.5, y + h / 2, h / 2, -Math.PI / 2, Math.PI / 2);
+      ctx.lineTo(x + w - r, y);
+      ctx.arc(x + w - r, y + h / 2, r, -Math.PI / 2, Math.PI / 2);
       ctx.lineTo(x, y + h);
       ctx.closePath();
-    } else if (name === 'Or' || name === 'Nor' || name === 'Xor') {
+    } else if (name === 'Or' || name === 'Nor' || name === 'Xor' || name === 'Xnor') {
       const k = 0.16;
       ctx.moveTo(x, y);
       ctx.bezierCurveTo(x + w * 0.35, y + h * k, x + w * 0.68, y + h * 0.2, x + w, y + h / 2);
@@ -284,11 +302,13 @@ export function createRenderer(canvas) {
     const { x, y, w, h } = it;
     const name = it.node.name;
     const bub = bubbleFor(name);
-    const bodyW = w - (bub ? 14 : 0);
+    // bubbled glyphs end at the bubble's left edge (w - 8) so the bubble
+    // kisses the body while the output wire still anchors at x + w
+    const bodyW = w - (bub ? 8 : 0);
     gateShapePath(name, x, y, bodyW, h);
     ctx.fill();
     ctx.stroke();
-    if (name === 'Xor') {
+    if (name === 'Xor' || name === 'Xnor') {
       // second concave back edge, characteristic of XOR
       ctx.beginPath();
       ctx.moveTo(x + 5, y);
