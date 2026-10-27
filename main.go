@@ -29,6 +29,7 @@ type Circuit struct {
 	parentStack []int // every scope (recorded or hidden abstraction)
 	visStack    []int // innermost *recorded* chip scope; raw Nands attach here
 	names       map[Signal]string
+	clk         Signal
 }
 
 func NewCircuit() *Circuit {
@@ -849,6 +850,44 @@ func (c *Circuit) DMux(in, sel Signal) (a, b Signal) {
 	return a, b
 }
 
+func (c *Circuit) DMux4Way(in Signal, sel [2]Signal) (a, b, c_, d Signal) {
+	// s1,s0||a,b,c,d
+	// 0,0 || a,0,0,0
+	// 0,1 || 0,b,0,0
+	// 1,0 || 0,0,c,0
+	// 1,1 || 0,0,0,d
+	// ----------
+	// 2xDmux
+	// out=a||b
+	// Not(sel[1]) so that sel1=1
+	ab := c.And(c.Not(sel[1]), in)
+	a, b = c.DMux(ab, sel[0])
+	// out=c||d
+	cd := c.And(sel[1], in)
+	c_, d = c.DMux(cd, sel[0])
+
+	return a, b, c_, d
+}
+
+func (c *Circuit) DMux8Way(in Signal, sel [3]Signal) (a, b, c_, d, e, f, g, h Signal) {
+
+	// ns := Not(sel[2])
+	sel2 := [2]Signal{sel[0], sel[1]}
+	a, b, c_, d = c.DMux4Way(in, sel2)
+	e, f, g, h = c.DMux4Way(in, sel2)
+
+	a = c.And(a, c.Not(sel[2]))
+	b = c.And(b, c.Not(sel[2]))
+	c_ = c.And(c_, c.Not(sel[2]))
+	d = c.And(d, c.Not(sel[2]))
+	e = c.And(e, sel[2])
+	f = c.And(f, sel[2])
+	g = c.And(g, sel[2])
+	h = c.And(h, sel[2])
+
+	return a, b, c_, d, e, f, g, h
+}
+
 func (c *Circuit) And16(a, b [16]Signal) (o [16]Signal) {
 	// flatten the two buses into the Inputs slice for the diagram
 	ins := make([]Signal, 0, 32)
@@ -886,6 +925,31 @@ func (c *Circuit) Mux16(a, b [16]Signal, sel Signal) (o [16]Signal) {
 	return o
 }
 
+func (c *Circuit) Mux8Way16(a, b, c_, d, e, f, g, h [16]Signal, sel [3]Signal) (out [16]Signal) {
+	ins := make([]Signal, 0, 128+3)
+	ins = append(ins, a[:]...)
+	ins = append(ins, b[:]...)
+	ins = append(ins, c_[:]...)
+	ins = append(ins, d[:]...)
+	ins = append(ins, e[:]...)
+	ins = append(ins, f[:]...)
+	ins = append(ins, g[:]...)
+	ins = append(ins, h[:]...)
+	ins = append(ins, sel[:]...)
+	id := c.begin("Mux8Way16", ins)
+
+	ab := c.Mux16(a, b, sel[0])
+	cd := c.Mux16(c_, d, sel[0])
+	ef := c.Mux16(e, f, sel[0])
+	gh := c.Mux16(g, h, sel[0])
+	abcd := c.Mux16(ab, cd, sel[1])
+	efgh := c.Mux16(ef, gh, sel[1])
+
+	out = c.Mux16(abcd, efgh, sel[2])
+	c.end(id, out[:]...)
+	return out
+}
+
 // ALU performs various arithmetic and logic operations based on control flags.
 func (c *Circuit) ALU(x, y [16]Signal, zx, nx, zy, ny, f, no Signal) (out [16]Signal) {
 	ins := make([]Signal, 0, 38)
@@ -919,6 +983,112 @@ func (c *Circuit) ALU(x, y [16]Signal, zx, nx, zy, ny, f, no Signal) (out [16]Si
 	out = c.Xor16(fOut, no16)
 
 	c.end(aluID, out[:]...)
+	return out
+}
+
+//
+
+func (c *Circuit) Clock() Signal {
+	if c.clk == 0 {
+		c.clk = c.name(c.alloc(), "clk")
+	}
+	return c.clk
+}
+
+func (c *Circuit) DLatch(d, clk Signal) (q, qn Signal) {
+	id := c.begin("DLatch", []Signal{d, clk})
+
+	notD := c.Not(d)
+	s := c.Nand(d, clk)    // active-low set
+	r := c.Nand(notD, clk) // active-low reset
+
+	// Cross-coupled NAND pair (feedback).
+	// Pre-allocate the two output signals so we can close the loop,
+	// then emit the two Nand gates directly (same parent as a normal Nand).
+	q = c.alloc()
+	qn = c.alloc()
+	parent := c.currentTopNode()
+
+	c.Gates = append(c.Gates, Gate{
+		NodeID: int(q),
+		Name:   "Nand",
+		Inputs: []Signal{s, qn},
+		Output: q,
+		Parent: parent,
+	})
+	c.Gates = append(c.Gates, Gate{
+		NodeID: int(qn),
+		Name:   "Nand",
+		Inputs: []Signal{r, q},
+		Output: qn,
+		Parent: parent,
+	})
+
+	c.end(id, q, qn)
+	return q, qn
+}
+
+func (c *Circuit) DFF(in Signal) Signal {
+	id := c.begin("DFF", []Signal{in})
+
+	clk := c.Clock()
+	notClk := c.Not(clk)
+
+	qm, _ := c.DLatch(in, notClk)
+	q, _ := c.DLatch(qm, clk)
+
+	c.end(id, q)
+
+	return q
+}
+
+func (c *Circuit) Bit(in, load Signal) Signal {
+	id := c.begin("Bit", []Signal{in, load})
+
+	out := c.alloc()
+	muxOut := c.Mux(out, in, load)
+	dffOut := c.DFF(muxOut)
+
+	c.end(id, dffOut)
+
+	return dffOut
+}
+
+func (c *Circuit) Register16(in [16]Signal, load Signal) (out [16]Signal) {
+	ins := make([]Signal, 0, 17)
+	ins = append(ins, in[:]...)
+	ins = append(ins, load)
+	id := c.begin("Register", ins)
+
+	for i := range 16 {
+		out[i] = c.Bit(in[i], load)
+	}
+
+	c.end(id, out[:]...)
+	return out
+}
+
+func (c *Circuit) Ram8(in [16]Signal, address [3]Signal, load Signal) (out [16]Signal) {
+	// address_width = log2(n)
+	// RAMn in[16], address[k], load
+	// out[16]
+	// out(t) = RAM[address(t-1)](t)
+
+	var la, lb, lc, ld, le, lf, lg, lh = c.DMux8Way(load, address)
+
+	var ra, rb, rc, rd, re, rf, rg, rh [16]Signal
+
+	ra = c.Register16(in, la)
+	rb = c.Register16(in, lb)
+	rc = c.Register16(in, lc)
+	rd = c.Register16(in, ld)
+	re = c.Register16(in, le)
+	rf = c.Register16(in, lf)
+	rg = c.Register16(in, lg)
+	rh = c.Register16(in, lh)
+
+	out = c.Mux8Way16(ra, rb, rc, rd, re, rf, rg, rh, address)
+
 	return out
 }
 
