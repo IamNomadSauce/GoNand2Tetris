@@ -894,20 +894,18 @@ func (c *Circuit) DMux(in, sel Signal) (a, b Signal) {
 }
 
 func (c *Circuit) DMux4Way(in Signal, sel [2]Signal) (a, b, c_, d Signal) {
-	// s1,s0||a,b,c,d
+	// MSB-first: sel[0] is the high bit of the pair, sel[1] the low bit.
+	// sel[0],sel[1]||a,b,c,d
 	// 0,0 || a,0,0,0
 	// 0,1 || 0,b,0,0
 	// 1,0 || 0,0,c,0
 	// 1,1 || 0,0,0,d
-	// ----------
 	// 2xDmux
-	// out=a||b
-	// Not(sel[1]) so that sel1=1
-	ab := c.And(c.Not(sel[1]), in)
-	a, b = c.DMux(ab, sel[0])
+	ab := c.And(c.Not(sel[0]), in)
+	a, b = c.DMux(ab, sel[1])
 	// out=c||d
-	cd := c.And(sel[1], in)
-	c_, d = c.DMux(cd, sel[0])
+	cd := c.And(sel[0], in)
+	c_, d = c.DMux(cd, sel[1])
 
 	return a, b, c_, d
 }
@@ -916,19 +914,20 @@ func (c *Circuit) DMux8Way(in Signal, sel [3]Signal) (a, b, c_, d, e, f, g, h Si
 	ins := []Signal{in, sel[0], sel[1], sel[2]}
 	id := c.begin("DMux8Way", ins)
 
-	// ns := Not(sel[2])
-	sel2 := [2]Signal{sel[0], sel[1]}
+	// MSB-first: sel[0] is the high bit (a..h = output index), the two
+	// DMux4Way halves both decode sel[1..2] and are gated by sel[0].
+	sel2 := [2]Signal{sel[1], sel[2]}
 	a, b, c_, d = c.DMux4Way(in, sel2)
 	e, f, g, h = c.DMux4Way(in, sel2)
 
-	a = c.And(a, c.Not(sel[2]))
-	b = c.And(b, c.Not(sel[2]))
-	c_ = c.And(c_, c.Not(sel[2]))
-	d = c.And(d, c.Not(sel[2]))
-	e = c.And(e, sel[2])
-	f = c.And(f, sel[2])
-	g = c.And(g, sel[2])
-	h = c.And(h, sel[2])
+	a = c.And(a, c.Not(sel[0]))
+	b = c.And(b, c.Not(sel[0]))
+	c_ = c.And(c_, c.Not(sel[0]))
+	d = c.And(d, c.Not(sel[0]))
+	e = c.And(e, sel[0])
+	f = c.And(f, sel[0])
+	g = c.And(g, sel[0])
+	h = c.And(h, sel[0])
 
 	c.end(id, a, b, c_, d, e, f, g, h)
 
@@ -985,14 +984,17 @@ func (c *Circuit) Mux8Way16(a, b, c_, d, e, f, g, h [16]Signal, sel [3]Signal) (
 	ins = append(ins, sel[:]...)
 	id := c.begin("Mux8Way16", ins)
 
-	ab := c.Mux16(a, b, sel[0])
-	cd := c.Mux16(c_, d, sel[0])
-	ef := c.Mux16(e, f, sel[0])
-	gh := c.Mux16(g, h, sel[0])
+	// MSB-first: the bottom pass splits pairs on sel[2] (LSB), sel[1]
+	// merges the halves of each nibble and sel[0] picks the final half,
+	// so the selected slot index equals [3]sel interpreted MSB-first.
+	ab := c.Mux16(a, b, sel[2])
+	cd := c.Mux16(c_, d, sel[2])
+	ef := c.Mux16(e, f, sel[2])
+	gh := c.Mux16(g, h, sel[2])
 	abcd := c.Mux16(ab, cd, sel[1])
 	efgh := c.Mux16(ef, gh, sel[1])
 
-	out = c.Mux16(abcd, efgh, sel[2])
+	out = c.Mux16(abcd, efgh, sel[0])
 	c.end(id, out[:]...)
 	return out
 }
