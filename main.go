@@ -913,6 +913,8 @@ func (c *Circuit) DMux4Way(in Signal, sel [2]Signal) (a, b, c_, d Signal) {
 }
 
 func (c *Circuit) DMux8Way(in Signal, sel [3]Signal) (a, b, c_, d, e, f, g, h Signal) {
+	ins := []Signal{in, sel[0], sel[1], sel[2]}
+	id := c.begin("DMux8Way", ins)
 
 	// ns := Not(sel[2])
 	sel2 := [2]Signal{sel[0], sel[1]}
@@ -927,6 +929,8 @@ func (c *Circuit) DMux8Way(in Signal, sel [3]Signal) (a, b, c_, d, e, f, g, h Si
 	f = c.And(f, sel[2])
 	g = c.And(g, sel[2])
 	h = c.And(h, sel[2])
+
+	c.end(id, a, b, c_, d, e, f, g, h)
 
 	return a, b, c_, d, e, f, g, h
 }
