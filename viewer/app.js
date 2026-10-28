@@ -519,8 +519,8 @@ function expandableInDrill() {
     const id = stack.pop();
     const a = state.circuit.arch.get(id);
     if (a) {
-      // archetype: its guts if they exist, otherwise the raw bit instances
-      for (const k of (a.gutIds.length ? a.gutIds : a.memberIds)) push(k);
+      // archetype: expanding-all reveals the real bit instances
+      for (const k of a.memberIds) push(k);
       continue;
     }
     // real node: descend into its children, behind archetype markers too

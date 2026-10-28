@@ -104,18 +104,18 @@ export class CircuitData {
     // A homogeneous group of same-named sibling chips (the 16 Mux bit-slices
     // inside Mux16, the 16 FullAdders rippling through Add16, ...) is presented
     // in the view as ONE representative box with a count badge. Expanding an
-    // archetype shows its guts grouped by ROLE across all instances (virtual
-    // sub-archetypes), recursively down to "Nand ×N"; Nand-level archetypes
-    // expand to their real instances. Archetype ids are negative so they never
+    // archetype reveals the real member instances in export order, each
+    // expandable on its own (a Register's Bit ×16 becomes sixteen Bit chips,
+    // a Nand-level arch its raw NANDs). Archetype ids are negative so they never
     // collide with real node ids (which are >= 1) or DOCK (0).
-    this.arch = new Map(); // archId -> {id, parentId, name, count, memberIds, gutIds, inPins, outPins, ins, outs}
+    this.arch = new Map(); // archId -> {id, parentId, name, count, memberIds, inPins, outPins, ins, outs}
     this.archOfChild = new Map(); // instance id -> archId
     this.archOfParent = new Map(); // parent node id -> archId
     {
       const nextId = { n: -1 };
-      const makeArch = (parentId, name, memberIds, isVirtual) => {
+      const makeArch = (parentId, name, memberIds) => {
         const aid = nextId.n--;
-        const a = { id: aid, parentId, name, count: memberIds.length, memberIds, virtual: !!isVirtual, gutIds: [] };
+        const a = { id: aid, parentId, name, count: memberIds.length, memberIds };
         this.arch.set(aid, a);
         for (const k of memberIds) this.archOfChild.set(k, aid);
         return a;
@@ -127,35 +127,8 @@ export class CircuitData {
         if (kids.length < 2) continue;
         const name = this.nodes.get(kids[0]).name;
         if (!kids.every((k) => this.nodes.get(k).name === name)) continue;
-        const a = makeArch(id, name, [...kids], false);
+        const a = makeArch(id, name, [...kids]);
         this.archOfParent.set(id, a.id);
-      }
-
-      // virtual archetypes: the guts of an archetype, grouped by structural
-      // role (name + ordinal among same-named gut chips) across instances
-      const buildGuts = (a) => {
-        const groups = new Map(); // `${name}#${slot}` -> memberIds
-        for (const m of a.memberIds) {
-          const kids = this.children.get(m) || [];
-          const slotOf = new Map();
-          for (const k of kids) {
-            const nm = this.nodes.get(k).name;
-            const slot = slotOf.get(nm) ?? 0;
-            slotOf.set(nm, slot + 1);
-            const key = `${nm}#${slot}`;
-            if (!groups.has(key)) groups.set(key, []);
-            groups.get(key).push(k);
-          }
-        }
-        for (const [key, members] of groups) {
-          const [name] = key.split('#');
-          const g = makeArch(a.id, name, members, true);
-          a.gutIds.push(g.id);
-          buildGuts(g); // recurse (Nand members have no guts -> terminates)
-        }
-      };
-      for (const a of Array.from(this.arch.values())) { // snapshot: recursion appends
-        if (!a.virtual) buildGuts(a);
       }
 
       for (const a of this.arch.values()) {
@@ -261,15 +234,12 @@ function busIndex(circuit, base, signal) {
 // viewNode: { node, children: viewNode[]|null, container: bool, inPins, outPins }
 // Pins (computed only for containers): [{signals, bits, label, base, isBus}]
 export function buildView(circuit, drillRootId, expanded) {
-  // view node for an archetype (real or virtual): expansion reveals its role-
-  // grouped guts when they exist, otherwise the real instances (Nand level)
+  // view node for an archetype: expansion reveals the real member instances
+  // in export order — Register's Bit ×16 becomes sixteen Bit chips, each
+  // expandable on its own; Nand-level arches expand to their raw instances
   const archVnOf = (a) => {
     const openA = expanded.has(a.id);
-    const kids = openA
-      ? (a.gutIds.length
-        ? a.gutIds.map((gid) => archVnOf(circuit.arch.get(gid)))
-        : a.memberIds.map((mid) => walk(circuit.nodes.get(mid))))
-      : null;
+    const kids = openA ? a.memberIds.map((mid) => walk(circuit.nodes.get(mid))) : null;
     return {
       node: {
         id: a.id,
