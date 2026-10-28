@@ -673,6 +673,46 @@ func buildALU() *Circuit {
 	return c
 }
 
+func buildDFF() *Circuit {
+	c := NewCircuit()
+	in := c.name(c.alloc(), "in")
+	out := c.DFF(in)
+	c.name(out, "out")
+	return c
+}
+
+func buildRegister() *Circuit {
+	c := NewCircuit()
+	var in [16]Signal
+	for i := range 16 {
+		in[i] = c.name(c.alloc(), fmt.Sprintf("in[%d]", i))
+	}
+	load := c.name(c.alloc(), "load")
+	out := c.Register16(in, load)
+	for i := range out {
+		c.name(out[i], fmt.Sprintf("out[%d]", i))
+	}
+	return c
+}
+
+func buildRAM8() *Circuit {
+	c := NewCircuit()
+	var in [16]Signal
+	for i := range 16 {
+		in[i] = c.name(c.alloc(), fmt.Sprintf("in[%d]", i))
+	}
+	load := c.name(c.alloc(), "load")
+	var address [3]Signal
+	for i := range 3 {
+		address[i] = c.name(c.alloc(), fmt.Sprintf("address[%d]", i))
+	}
+	out := c.RAM8(in, load, address)
+	for i := range out {
+		c.name(out[i], fmt.Sprintf("out[%d]", i))
+	}
+	return c
+}
+
 func buildBundle() BundleJSON {
 	type named struct {
 		name string
@@ -684,6 +724,9 @@ func buildBundle() BundleJSON {
 		{"Mux16", buildMux16()},
 		{"FullAdder", buildFullAdder()},
 		{"HalfAdder", buildHalfAdder()},
+		{"DFF", buildDFF()},
+		{"Register", buildRegister()},
+		{"RAM8", buildRAM8()},
 	}
 	bundle := BundleJSON{}
 	for _, d := range defs {
@@ -743,7 +786,7 @@ func serve(port int) {
 
 func main() {
 	dotMode := flag.Bool("dot", false, "legacy: write .dot/.png files instead of serving the viewer")
-	port := flag.Int("port", 8080, "port for the viewer server")
+	port := flag.Int("port", 8081, "port for the viewer server")
 	flag.Parse()
 
 	if *dotMode {
@@ -1068,11 +1111,16 @@ func (c *Circuit) Register16(in [16]Signal, load Signal) (out [16]Signal) {
 	return out
 }
 
-func (c *Circuit) Ram8(in [16]Signal, address [3]Signal, load Signal) (out [16]Signal) {
+func (c *Circuit) RAM8(in [16]Signal, load Signal, address [3]Signal) (out [16]Signal) {
 	// address_width = log2(n)
 	// RAMn in[16], address[k], load
 	// out[16]
 	// out(t) = RAM[address(t-1)](t)
+	ins := make([]Signal, 0, 16+1+3)
+	ins = append(ins, in[:]...)
+	ins = append(ins, load)
+	ins = append(ins, address[:]...)
+	id := c.begin("RAM8", ins)
 
 	var la, lb, lc, ld, le, lf, lg, lh = c.DMux8Way(load, address)
 
@@ -1088,6 +1136,8 @@ func (c *Circuit) Ram8(in [16]Signal, address [3]Signal, load Signal) (out [16]S
 	rh = c.Register16(in, lh)
 
 	out = c.Mux8Way16(ra, rb, rc, rd, re, rf, rg, rh, address)
+
+	c.end(id, out[:]...)
 
 	return out
 }
