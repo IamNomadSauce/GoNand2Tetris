@@ -48,9 +48,28 @@ aside {
   background: var(--panel2);
   display: flex; flex-direction: column; gap: 10px;
   padding: 10px;
+  position: relative;
+  transition: width .12s ease;
 }
 #sidebar { border-right: 1px solid var(--border); }
 #inspector { width: 300px; border-left: 1px solid var(--border); }
+
+/* collapsible side panels (sticky so they survive panel scrolling) */
+.side-toggle {
+  position: sticky; top: 2px; z-index: 8;
+  align-self: flex-end;
+  width: 22px; height: 26px; padding: 0; line-height: 1;
+  font-size: 13px; color: var(--dim); flex: none;
+}
+.side-toggle:hover { color: var(--text); }
+body.left-collapsed #sidebar, body.right-collapsed #inspector {
+  width: 26px; overflow: hidden; padding: 10px 0;
+}
+body.left-collapsed #sidebar .panel,
+body.right-collapsed #inspect-body { display: none; }
+body.left-collapsed #toggle-left { transform: scaleX(-1); }
+body.right-collapsed #toggle-right { transform: scaleX(-1); }
+body.no-anim aside { transition: none; }
 
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 .panel h2 {

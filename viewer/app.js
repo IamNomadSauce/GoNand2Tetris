@@ -44,6 +44,40 @@ const canvas = $('canvas');
 const renderer = createRenderer(canvas);
 const tooltip = $('tooltip');
 
+// ---------- collapsible side panels ----------
+
+const sideCollapsed = {
+  left: localStorage.getItem('n2t.sidebar') === '1',
+  right: localStorage.getItem('n2t.inspector') === '1',
+};
+
+function applySidebars() {
+  document.body.classList.toggle('left-collapsed', sideCollapsed.left);
+  document.body.classList.toggle('right-collapsed', sideCollapsed.right);
+  state.dirty = true;
+}
+
+function toggleSidebar(which) {
+  sideCollapsed[which] = !sideCollapsed[which];
+  localStorage.setItem(which === 'left' ? 'n2t.sidebar' : 'n2t.inspector',
+    sideCollapsed[which] ? '1' : '0');
+  applySidebars();
+  // the panel width transition (0.12s) animates canvas.clientWidth;
+  // refit once it settles
+  setTimeout(() => { if (state.layout) fitView(); }, 170);
+}
+
+$('toggle-left').addEventListener('click', () => toggleSidebar('left'));
+$('toggle-right').addEventListener('click', () => toggleSidebar('right'));
+// restoring collapsed panels must not animate: the boot fit needs the final
+// geometry; re-enable the transition after the first stable layout pass
+document.body.classList.add('no-anim');
+applySidebars();
+requestAnimationFrame(() => requestAnimationFrame(() => {
+  document.body.classList.remove('no-anim');
+  if (state.layout) fitView();
+}));
+
 async function boot() {
   let circuits;
   if (window.EMBEDDED_CIRCUITS) {
